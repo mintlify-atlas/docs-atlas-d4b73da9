@@ -1,0 +1,109 @@
+---
+title: "Watchman type, size, exists, and empty expressions"
+description: "Reference for Watchman's type, size, exists, and empty expression terms for filtering files by kind, byte count, or presence on the filesystem."
+---
+
+Watchman provides expression terms that filter files based on their filesystem metadata: the kind of filesystem entry (regular file, directory, symlink, and so on), the number of bytes they contain, and whether they currently exist. These terms are frequently combined with pattern-matching terms to narrow query results to a precise set of files.
+
+## type
+
+The `type` expression evaluates to true when the file's type matches the specified character. This matches regular files:
+
+```json
+["type", "f"]
+```
+
+### Type characters
+
+| Character | File type |
+|---|---|
+| `f` | Regular file |
+| `d` | Directory |
+| `l` | Symbolic link |
+| `p` | Named pipe (FIFO) |
+| `s` | Socket |
+| `b` | Block special device |
+| `c` | Character special device |
+| `D` | Solaris Door |
+| `?` | Unknown file type |
+
+## size
+
+_Since version 3.1._
+
+The `size` expression compares the file's size in bytes against an integer operand using a relational operator. It evaluates to true only for files that currently exist. The term always takes exactly three elements:
+
+```json
+["size", "gt", 0]
+```
+
+The expression above is true for any existing file whose size is greater than zero.
+
+### Relational operators
+
+| Operator | Meaning | Evaluates to true when… |
+|---|---|---|
+| `eq` | Equal | file exists and `size == operand` |
+| `ne` | Not equal | file exists and `size != operand` |
+| `gt` | Greater than | file exists and `size > operand` |
+| `ge` | Greater than or equal | file exists and `size >= operand` |
+| `lt` | Less than | file exists and `size < operand` |
+| `le` | Less than or equal | file exists and `size <= operand` |
+
+## exists
+
+The `exists` expression evaluates to true if the file currently exists on the filesystem (that is, it has not been deleted). It can be written as a string or as a single-element array:
+
+```json
+"exists"
+["exists"]
+```
+
+<Note>
+Watchman tracks deleted files so that queries can report removals. Use `exists` to exclude deleted entries from results that should only include live files.
+</Note>
+
+## empty
+
+The `empty` expression evaluates to true if the file currently exists, is a regular file or directory, and contains zero bytes (or zero directory entries):
+
+```json
+"empty"
+["empty"]
+```
+
+## Combining type and size
+
+Use `allof` to combine type and size checks. The following expression matches regular files larger than 1 MiB:
+
+```json
+["allof",
+  ["type", "f"],
+  ["size", "gt", 1048576]
+]
+```
+
+Match non-empty regular files that exist:
+
+```json
+["allof",
+  ["type", "f"],
+  "exists",
+  ["not", "empty"]
+]
+```
+
+Match only directories:
+
+```json
+["type", "d"]
+```
+
+Match symbolic links smaller than 512 bytes:
+
+```json
+["allof",
+  ["type", "l"],
+  ["size", "lt", 512]
+]
+```

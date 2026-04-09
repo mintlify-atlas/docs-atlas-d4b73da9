@@ -1,0 +1,77 @@
+---
+title: "watch — register a directory for watching (deprecated)"
+description: "Register an exact directory path with Watchman for file change tracking. Deprecated since version 3.1 — use watch-project for all new integrations."
+---
+
+`watch` registers a specific directory path with the Watchman server and begins tracking all file and directory changes beneath it. Unlike [`watch-project`](/commands/watch-project), it watches exactly the path you provide — it makes no attempt to find a higher-level project root. This command has been **deprecated since Watchman 3.1**; new integrations should use `watch-project` instead.
+
+## Syntax
+
+```bash
+watchman watch <path>
+```
+
+## Parameters
+
+<ParamField path="path" type="string" required>
+  Absolute or shell-expanded path to the directory to watch. Watchman resolves the path through `realpath(3)` before registering it. On the CLI the shell expands `~`, but in the JSON protocol you must supply an absolute path yourself.
+</ParamField>
+
+## Response
+
+The server returns the resolved absolute path that was registered.
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="watch" type="string" required>
+  Absolute path of the directory that was registered for watching.
+</ResponseField>
+
+## Examples
+
+### CLI
+
+```bash
+watchman watch ~/www
+```
+
+### JSON protocol
+
+```json
+["watch", "/home/wez/www"]
+```
+
+## What happens when a directory is watched
+
+When Watchman registers a new watch it:
+
+1. Establishes a kernel change-notification hook (inotify on Linux, FSEvents on macOS, kqueue on BSDs) for the directory.
+2. Queues a full crawl of the directory tree.
+3. Recursively watches subdirectories as they are discovered during the crawl.
+4. Marks every file found during the initial crawl as changed.
+
+Watches (and their associated triggers) are persisted to the state file and re-established automatically when the Watchman service restarts, unless the service was started with `--no-save-state`.
+
+## Case-insensitive filesystem support
+
+On macOS (version 2.9.9 and later), Watchman detects whether each watched root is on a case-insensitive filesystem (the default for HFS+) and adjusts its behaviour accordingly:
+
+- Watchman resolves the canonical on-disk name for every observed change.
+- A filename case change is reported as a delete of the old name and a change for the new name.
+- Query expression name matching defaults to case-insensitive when the root is case-insensitive.
+- The `path` generator is always case-sensitive regardless of filesystem settings.
+
+<Warning>
+  `watch` is deprecated since Watchman 3.1. Use [`watch-project`](/commands/watch-project) instead. `watch-project` consolidates overlapping watches at the nearest project root, reducing the total number of kernel watches and avoiding OS limits.
+</Warning>
+
+## Difference from watch-project
+
+| | `watch` | `watch-project` |
+|---|---|---|
+| Watches | Exactly the path provided | Nearest project root (`.watchmanconfig` or `root_files`) |
+| Response | `watch` only | `watch` + optional `relative_path` |
+| Watch consolidation | No | Yes |
+| Status | Deprecated (3.1+) | Preferred |

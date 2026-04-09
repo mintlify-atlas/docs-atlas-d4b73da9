@@ -1,0 +1,56 @@
+---
+title: "watch-list — list all currently registered watches"
+description: "Return the set of directory roots currently registered with the Watchman server, useful for auditing watches and diagnosing stale or duplicate entries."
+---
+
+`watch-list` returns every directory root that is currently registered with the running Watchman server. It takes no arguments and emits a JSON array of absolute paths. Use it to audit which directories are being watched, verify that a watch was established, or identify stale watches that are consuming kernel resources.
+
+## Syntax
+
+```bash
+watchman watch-list
+```
+
+## Parameters
+
+This command takes no parameters.
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="roots" type="string[]" required>
+  Array of absolute paths for every directory currently registered as a watch root. The array is empty if no watches are active.
+</ResponseField>
+
+## Example
+
+### CLI
+
+```bash
+watchman watch-list
+```
+
+```json
+{
+  "version": "1.9",
+  "roots": [
+    "/home/wez/watchman"
+  ]
+}
+```
+
+### JSON protocol
+
+```json
+["watch-list"]
+```
+
+## Notes
+
+- Only watch _roots_ are listed. Watchman tracks subdirectories internally but they are not shown individually.
+- A path appears here regardless of whether it was registered via [`watch`](/commands/watch) or [`watch-project`](/commands/watch-project).
+- If you registered a watch via `watch-project` and the resolved root is an ancestor of the path you requested, the root (not your original path) is what appears in this list.
+- To remove a specific entry, use [`watch-del`](/commands/watch-del). To clear all watches at once, use [`watch-del-all`](/commands/watch-del-all).

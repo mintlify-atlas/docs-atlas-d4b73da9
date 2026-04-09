@@ -1,0 +1,231 @@
+---
+title: "Java File Watching with Watchman using watchman-lib"
+description: "Learn how to connect to Watchman from Java using the watchman-lib client to watch directories, run queries, and subscribe to file change events."
+---
+
+The Watchman Java client (`watchman-lib`) provides a `WatchmanClient` interface backed by `ListenableFuture` from [Guava](https://github.com/google/guava). It handles transport discovery automatically — on Unix it connects over a Unix domain socket; on Windows it uses a named pipe. The client communicates with the Watchman daemon using the BSER binary encoding for efficiency.
+
+## Build
+
+The Java client uses both [Buck](https://buckbuild.com/) and Maven as build systems.
+
+<Tabs>
+  <Tab title="Buck">
+    ```bash
+    buck fetch :watchman
+    buck build :watchman
+    ```
+
+    The resulting JAR is written to `buck-out/gen/watchman.jar`.
+
+    To run the tests:
+
+    ```bash
+    buck fetch :watchman-tests
+    buck test :watchman-lib
+    ```
+  </Tab>
+  <Tab title="Maven">
+    ```bash
+    mvn package
+    ```
+
+    The Maven build is defined in `pom.xml` with the artifact coordinates:
+
+    ```xml
+    <groupId>com.facebook.watchman</groupId>
+    <artifactId>watchman-lib</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    ```
+  </Tab>
+</Tabs>
+
+### Maven dependencies
+
+The client depends on the following libraries (declared in `pom.xml`):
+
+| Dependency               | Version  | Purpose                                      |
+| ------------------------ | -------- | -------------------------------------------- |
+| `com.google.guava:guava` | `19.0`   | `ListenableFuture`, `ImmutableList`, etc.    |
+| `net.java.dev.jna:jna`   | `4.2.0`  | Native Unix domain socket and pipe access.   |
+| `org.immutables:value`   | `2.1.5`  | Immutable value types (e.g., `SubscriptionDescriptor`). |
+| `com.zaxxer:nuprocess`   | `1.1.0`  | Non-blocking subprocess for socket discovery. |
+
+---
+
+## Getting started
+
+### Discover the transport and create a client
+
+`WatchmanTransportBuilder.discoverTransport()` runs `watchman get-sockname` to locate the daemon socket and returns the appropriate `WatchmanTransport` implementation.
+
+```java
+import com.facebook.watchman.WatchmanClient;
+import com.facebook.watchman.WatchmanClientImpl;
+import com.facebook.watchman.WatchmanTransport;
+import com.facebook.watchman.WatchmanTransportBuilder;
+
+WatchmanTransport transport = WatchmanTransportBuilder.discoverTransport();
+WatchmanClient client = new WatchmanClientImpl(transport);
+client.start();
+```
+
+<Note>
+  Always call `client.start()` after construction. This starts the background
+  thread that reads incoming PDUs from the daemon.
+</Note>
+
+### Watch a directory
+
+```java
+import java.nio.file.Paths;
+import java.util.Map;
+import com.google.common.util.concurrent.ListenableFuture;
+
+ListenableFuture<Map<String, Object>> watchFuture =
+    client.watch(Paths.get("/path/to/project"));
+
+Map<String, Object> watchResp = watchFuture.get();
+System.out.println("watch: " + watchResp.get("watch"));
+System.out.println("relative_path: " + watchResp.get("relative_path"));
+```
+
+### Run an arbitrary command
+
+Use `client.run(command)` to send any Watchman command as a list of objects:
+
+```java
+import com.google.common.collect.ImmutableList;
+
+ListenableFuture<Map<String, Object>> versionFuture =
+    client.run(ImmutableList.<Object>of("version"));
+
+Map<String, Object> versionResp = versionFuture.get();
+System.out.println("Watchman version: " + versionResp.get("version"));
+```
+
+### Check capabilities
+
+```java
+import java.util.Arrays;
+import java.util.Collections;
+
+ListenableFuture<Map<String, Object>> capFuture = client.version(
+    Collections.<String>emptyList(),          // optional capabilities
+    Arrays.asList("relative_root")            // required capabilities
+);
+
+Map<String, Object> capResp = capFuture.get();
+Map<?, ?> capabilities = (Map<?, ?>) capResp.get("capabilities");
+System.out.println("relative_root supported: " + capabilities.get("relative_root"));
+```
+
+### Subscribe to file changes
+
+Subscriptions deliver file change events to a `Callback` implementation. The callback is invoked on the client's background reader thread whenever matching files change.
+
+```java
+import com.facebook.watchman.Callback;
+import com.google.common.collect.ImmutableMap;
+
+Map<String, Object> query = ImmutableMap.<String, Object>of(
+    "expression", Arrays.asList("allof", Arrays.asList("match", "*.java")),
+    "fields",     Arrays.asList("name", "exists", "type")
+);
+
+Callback listener = new Callback() {
+    @Override
+    public void call(Map<String, Object> message) throws Exception {
+        System.out.println("subscription: " + message.get("subscription"));
+        System.out.println("files: " + message.get("files"));
+    }
+};
+
+ListenableFuture<WatchmanClient.SubscriptionDescriptor> subFuture =
+    client.subscribe(Paths.get("/path/to/project"), query, listener);
+
+WatchmanClient.SubscriptionDescriptor descriptor = subFuture.get();
+System.out.println("subscribed: " + descriptor.name() + " on " + descriptor.root());
+```
+
+### Unsubscribe
+
+```java
+client.unsubscribe(descriptor).get();
+// Or cancel all active subscriptions at once:
+client.unsubscribeAll().get();
+```
+
+### Get the current clock
+
+```java
+ListenableFuture<Map<String, Object>> clockFuture =
+    client.clock(Paths.get("/path/to/project"));
+Map<String, Object> clockResp = clockFuture.get();
+System.out.println("clock: " + clockResp.get("clock"));
+```
+
+Pass a `syncTimeout` (in milliseconds) to wait for the daemon to synchronize with the filesystem before reporting the clock:
+
+```java
+client.clock(Paths.get("/path/to/project"), 5000).get();
+```
+
+### Closing the client
+
+```java
+client.close();
+```
+
+---
+
+## API reference
+
+All methods are on `com.facebook.watchman.WatchmanClient` and return `ListenableFuture`. Block with `.get()` or attach callbacks with `Futures.addCallback(...)` from Guava.
+
+| Method | Return type | Description |
+| ------ | ----------- | ----------- |
+| `watch(path)` | `ListenableFuture<Map<String, Object>>` | Issues `watch-project` for the given path. |
+| `watchDel(path)` | `ListenableFuture<Map<String, Object>>` | Removes the watch for the given path. |
+| `clock(path)` | `ListenableFuture<Map<String, Object>>` | Returns the current clock for the given root. |
+| `clock(path, syncTimeout)` | `ListenableFuture<Map<String, Object>>` | Returns the clock after syncing for up to `syncTimeout` ms. |
+| `subscribe(path, query, listener)` | `ListenableFuture<SubscriptionDescriptor>` | Subscribes to file changes matching `query`. |
+| `unsubscribe(descriptor)` | `ListenableFuture<Boolean>` | Cancels the named subscription. |
+| `unsubscribeAll()` | `ListenableFuture<Boolean>` | Cancels all active subscriptions. |
+| `version()` | `ListenableFuture<Map<String, Object>>` | Returns server version information. |
+| `version(optional, required)` | `ListenableFuture<Map<String, Object>>` | Returns version and capability check results. |
+| `run(command)` | `ListenableFuture<Map<String, Object>>` | Sends an arbitrary command list to Watchman. |
+| `start()` | `void` | Starts the background PDU reader thread. |
+| `close()` | `void` | Closes the connection and stops the reader thread. |
+
+### `SubscriptionDescriptor`
+
+An immutable value type returned by `subscribe()`. Identifies a subscription by root path and name.
+
+```java
+descriptor.root();  // absolute path of the watched root
+descriptor.name();  // auto-generated subscription ID (e.g., "sub-0")
+```
+
+### `Callback`
+
+A single-method interface invoked for each unilateral event (subscription update or log message):
+
+```java
+public interface Callback {
+    void call(Map<String, Object> message) throws Exception;
+}
+```
+
+---
+
+## Transport discovery
+
+`WatchmanTransportBuilder` runs `watchman --output-encoding=bser get-sockname` as a subprocess, decodes the BSER response, and connects to the reported socket path. On Unix this creates a `UnixDomainSocket`; on Windows it creates a `WindowsNamedPipe`. Pass a timeout to `discoverTransport(duration, unit)` to bound the subprocess wait.
+
+```java
+import java.util.concurrent.TimeUnit;
+
+WatchmanTransport transport =
+    WatchmanTransportBuilder.discoverTransport(5, TimeUnit.SECONDS);
+```

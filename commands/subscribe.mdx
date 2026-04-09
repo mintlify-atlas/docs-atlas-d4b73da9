@@ -1,0 +1,196 @@
+---
+title: "subscribe — stream real-time file change notifications"
+description: "Register a named subscription on a watched root to receive ongoing file change notifications delivered as JSON packets over an open connection."
+---
+
+The `subscribe` command registers a named subscription on a watched root and streams file change notifications to your client over its open connection. Each time files change and the filesystem settles, Watchman evaluates your expression and delivers matching results as unilateral JSON packets. When the connection closes, all subscriptions on it are automatically removed.
+
+## Syntax
+
+```bash
+# Observe changes interactively from the CLI
+watchman -j --server-encoding=json -p <<< '["subscribe", "/path", "name", {...}]'
+```
+
+In production, subscriptions are driven by the socket interface. Send the JSON command once, then read the incoming notification packets in a loop.
+
+## Basic example
+
+```bash
+watchman -j --server-encoding=json -p <<-EOT
+["subscribe", "/path/to/root", "mysubscription", {
+  "expression": ["allof",
+    ["type", "f"],
+    ["not", "empty"],
+    ["suffix", "php"]
+  ],
+  "fields": ["name"]
+}]
+EOT
+```
+
+## Subscription object fields
+
+<ParamField body="expression" type="array | string">
+  A filter expression applied to every changed file before it is sent to the client. Files that evaluate to `true` are included. If omitted, all changed files are delivered. Uses the same syntax as the [`query` command](/commands/query).
+</ParamField>
+
+<ParamField body="fields" type="string[]" default='["name", "exists", "new", "size", "mode"]'>
+  The file fields to include in each notification packet. Accepts the same values as the `query` command's `fields` parameter.
+</ParamField>
+
+<ParamField body="since" type="string">
+  A clockspec used to seed the initial notification. When set, the first delivery includes only files changed since that clock — equivalent to using the `since` generator in a `query`. The suggested pattern is to persist the last received `clock` value and pass it here when reconnecting.
+</ParamField>
+
+<ParamField body="defer_vcs" type="boolean" default="true">
+  _Since 3.2._ When `true` (the default), Watchman holds subscription notifications while a version control operation is in progress, detected by the presence of `.hg/wlock` or `.git/index.lock`. Set to `false` to receive notifications including the individual VCS control file changes at the start of operations.
+</ParamField>
+
+<ParamField body="defer" type="string[]">
+  _Since 4.4._ A list of state names. When a client signals that one of these states has been entered via [`state-enter`](/commands/state-enter), Watchman pauses notification delivery for this subscription until the state is vacated via [`state-leave`](/commands/state-leave). Queued notifications are delivered in full once the state ends.
+</ParamField>
+
+<ParamField body="drop" type="string[]">
+  _Since 4.4._ A list of state names. Works like `defer` but discards queued notifications when the state ends, fast-forwarding the subscription cursor to the `state-leave` clock. Use this when you do not need to process changes that happened during the state.
+</ParamField>
+
+## Response
+
+### Subscription acknowledgement
+
+After sending the subscribe command, the server responds with:
+
+```json
+{
+  "version": "1.6",
+  "subscribe": "mysubscription"
+}
+```
+
+### Change notifications
+
+When files change and the settle period passes, the server sends unilateral packets:
+
+```json
+{
+  "version": "1.6",
+  "clock": "c:1234:123",
+  "root": "/path/being/watched",
+  "subscription": "mysubscription",
+  "files": ["one.php", "lib/two.php"]
+}
+```
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version string.
+</ResponseField>
+
+<ResponseField name="clock" type="string" required>
+  The clock at the time of this notification. Store this and pass it as the `since` parameter when you reconnect to avoid missing changes.
+</ResponseField>
+
+<ResponseField name="root" type="string" required>
+  The watched root this notification is for.
+</ResponseField>
+
+<ResponseField name="subscription" type="string" required>
+  The name of the subscription that generated this notification.
+</ResponseField>
+
+<ResponseField name="files" type="object[] | scalar[]" required>
+  The files that changed, shaped according to the `fields` specified when subscribing.
+</ResponseField>
+
+<ResponseField name="is_fresh_instance" type="boolean">
+  Present on the initial notification when no `since` was provided, or when the provided `since` refers to a stale clock.
+</ResponseField>
+
+## Filesystem settling
+
+Watchman does not deliver a notification for every individual file change. Instead, it waits for the change stream to settle before dispatching. This avoids a flood of partial notifications during rapid bulk operations.
+
+**Before version 3.2**, settling meant waiting for the kernel notification queue to drain.
+
+**Since version 3.2**, if the watched root appears to be a version control working copy (detected by `.hg/wlock` or `.git/index.lock`), Watchman additionally waits for any in-progress VCS operation to complete before dispatching. This prevents spurious notifications during rebase or merge operations.
+
+To receive VCS control file changes immediately instead of waiting, set `"defer_vcs": false` in your subscription:
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "expression": ["type", "f"],
+  "defer_vcs": false,
+  "fields": ["name"]
+}]
+```
+
+## Advanced settling with defer and drop
+
+_Since 4.4_
+
+For integrations where another tool (such as Git or Mercurial) can signal the beginning and end of bulk operations, you can coordinate with Watchman using the `defer` and `drop` fields together with the [`state-enter`](/commands/state-enter) and [`state-leave`](/commands/state-leave) commands.
+
+### Deferring notifications
+
+Use `defer` when you want to receive all notifications but process them only after a bulk operation completes:
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "defer": ["hg.update"],
+  "fields": ["name"]
+}]
+```
+
+When a client calls `state-enter` with `"hg.update"`, Watchman sends a state notification:
+
+```json
+{
+  "subscription": "mysubscription",
+  "root": "/path/to/root",
+  "state-enter": "hg.update",
+  "clock": "c:1234:100"
+}
+```
+
+Notifications with `files` are held until the matching `state-leave`, at which point Watchman sends a state-leave packet followed by all queued file notifications.
+
+### Dropping notifications
+
+Use `drop` when changes during a bulk operation are irrelevant and you want to skip processing them entirely:
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "drop": ["hg.update"],
+  "fields": ["name"]
+}]
+```
+
+When the state ends, the subscription cursor fast-forwards to the `state-leave` clock, discarding all intermediate changes.
+
+<Note>
+  Mixing `defer` and `drop` for multiple overlapping states on a single subscription is complex. If you need both behaviors, consider using `drop` for all states and issuing bounded `query` calls using the `clock` fields from state PDUs to read the changes you care about.
+</Note>
+
+## Reconnecting after a disconnect
+
+The recommended pattern is to persist the last `clock` value received and pass it as the `since` parameter when re-establishing the subscription:
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "since": "c:1234:123",
+  "expression": ["not", "empty"],
+  "fields": ["name"]
+}]
+```
+
+This ensures you receive any changes that occurred while the connection was closed, without re-processing the entire file tree.
+
+## Source control aware subscriptions
+
+_Since 4.9_
+
+For repositories using source control, Watchman supports richer subscriptions that are aware of commit boundaries. See the [source control aware subscriptions guide](/guides/scm-queries) for details.
+
+## Cancelling a subscription
+
+To cancel a subscription explicitly, use the [`unsubscribe`](/commands/unsubscribe) command. Subscriptions are also removed automatically when the connection that created them closes.

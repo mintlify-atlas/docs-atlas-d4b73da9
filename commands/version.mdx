@@ -1,0 +1,153 @@
+---
+title: "version — check Watchman server version and capabilities"
+description: "Query the running Watchman server version and test for named capability support to avoid hardcoding version numbers in your client."
+---
+
+The `version` command returns the version of the running Watchman server. It also supports an extended form that lets you test for named _capabilities_ — a stable way to check for specific features without having to know which version introduced them.
+
+## Syntax
+
+```bash
+watchman version
+```
+
+JSON extended form:
+
+```json
+["version", {"optional": ["<cap>"], "required": ["<cap>"]}]
+```
+
+## Basic usage
+
+```bash
+$ watchman version
+{
+  "version": "2.9.6"
+}
+```
+
+To check the version of the CLI binary itself (not the running server):
+
+```bash
+$ watchman -v
+2.9.8
+```
+
+<Note>
+If the client and server versions differ, restart the server: `watchman shutdown-server && watchman`.
+</Note>
+
+## Capability checking
+
+_Available since Watchman 3.8._
+
+Rather than comparing version strings, you can ask the server whether it supports a named capability. Watchman defines capability names for commands (`cmd-*`), expression terms (`term-*`), fields (`field-*`), and specific feature enhancements. See [Capabilities](/capabilities) for the full list.
+
+Pass capability names in either an `optional` array or a `required` array:
+
+- **`optional`** — the server reports `true` or `false` for each name but always returns a success response.
+- **`required`** — same reporting, but if any name maps to `false` the response also includes an `error` field.
+
+### Request fields
+
+<ParamField body="optional" type="string[]">
+  Capability names to probe. The server returns `true` or `false` for each without treating absence as an error.
+</ParamField>
+
+<ParamField body="required" type="string[]">
+  Capability names that must be present. The server returns `true` or `false` for each, and sets `error` if any are `false`.
+</ParamField>
+
+### Response fields
+
+<ResponseField name="version" type="string" required>
+  The running server version string.
+</ResponseField>
+
+<ResponseField name="capabilities" type="object">
+  Present when capabilities were requested. Keys are the capability names from the union of `optional` and `required`; values are `true` if the capability is supported, `false` otherwise.
+</ResponseField>
+
+<ResponseField name="error" type="string">
+  Present only when one or more `required` capabilities are not supported. Contains a human-readable message naming the missing capability.
+</ResponseField>
+
+## Examples
+
+### Check an optional capability
+
+```bash
+$ watchman -j <<< '["version", {"optional": ["relative_root"]}]'
+{
+  "version": "3.8.0",
+  "capabilities": {
+    "relative_root": true
+  }
+}
+```
+
+### Required capability that is missing
+
+```bash
+$ watchman -j <<< '["version", {"required": ["will-never-exist"]}]'
+{
+  "version": "3.8.0",
+  "capabilities": {
+    "will-never-exist": false
+  },
+  "error": "client required capability `will-never-exist` is not supported by this server"
+}
+```
+
+### Mix of required and optional capabilities
+
+```bash
+$ watchman -j <<< '["version", {"required": ["term-match"], "optional": ["a", "b"]}]'
+{
+  "version": "3.8.0",
+  "capabilities": {
+    "a": false,
+    "b": false,
+    "term-match": true
+  }
+}
+```
+
+## Using capabilityCheck in client libraries
+
+The Node.js and Python client libraries provide a `capabilityCheck` helper. It issues the version command above and also emulates capability detection against older servers that pre-date named capabilities.
+
+<CodeGroup>
+
+```javascript Node.js
+var watchman = require('fb-watchman');
+var client = new watchman.Client();
+
+client.capabilityCheck(
+  { optional: ['relative_root'], required: ['term-match'] },
+  function (error, resp) {
+    if (error) {
+      // error is set if the server is not installed or if any
+      // required capability is missing
+      console.error(error);
+      client.end();
+      return;
+    }
+    // resp: { version: '3.8.0', capabilities: { 'term-match': true, relative_root: true } }
+    console.log(resp);
+    client.end();
+  }
+);
+```
+
+```python Python
+import pywatchman
+
+client = pywatchman.client()
+# raises an error if any required capability is missing
+res = client.capabilityCheck(optional=['relative_root'], required=['term-match'])
+print(res)
+# {'version': '3.8.0', 'capabilities': {'term-match': True, 'relative_root': True}}
+```
+
+</CodeGroup>

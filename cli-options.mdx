@@ -1,0 +1,172 @@
+---
+title: "Watchman CLI flags: client options and server startup"
+description: "Reference for all watchman flags: client spawning, JSON and BSER input modes, exit status, and server options for statefile, logfile, and log level."
+---
+
+The `watchman` executable contains both the client and server components of the Watchman service. When you run it, it attempts to communicate with your existing server instance (each user has their own persistent process) and starts one if none is running. Flags are divided into those that affect the client, those that control server startup, and those that affect both.
+
+## Default locations
+
+Watchman resolves a few path variables used throughout its configuration:
+
+- **`<USER>`** — resolved from `$USER`, then `$LOGNAME`, then `getpwuid(getuid())`
+- **`<TMPDIR>`** — resolved from `$TMPDIR`, then `$TMP`, then `/tmp`
+- **`<STATEDIR>`** — the directory where Watchman stores persistent state
+
+Since version 3.1, `STATEDIR` defaults to `<PREFIX>/var/run/watchman`. Since version 3.8 it defaults to `<PREFIX>/var/run/watchman/<USER>-state`. You can change this at build time with `--enable-statedir` or disable it with `--disable-statedir`, which falls back to `<TMPDIR>`.
+
+Watchman creates the `<USER>-state` directory if it does not exist and performs permission and ownership checks before starting. If those checks fail, Watchman refuses to start.
+
+## Locating the service
+
+```text
+-U, --sockname=PATH   Specify alternate sockname
+```
+
+The default socket path is `<STATEDIR>/<USER>`. Older Watchman versions defaulted to `<TMPDIR>/.watchman.<USER>`.
+
+If you are building a client to talk to Watchman programmatically, use `watchman get-sockname` to discover the socket path rather than constructing it yourself. This also spawns the service if it is not already running.
+
+```bash
+$ watchman get-sockname
+```
+
+```json
+{
+  "version": "2023-01-01",
+  "sockname": "/var/run/watchman/alice-state/sock"
+}
+```
+
+## Client options
+
+By default, Watchman spawns the service if it is not responding. To suppress this:
+
+```text
+--no-spawn    Don't spawn the service if it is not already running.
+              Will try running the command in client mode if possible.
+--no-local    When --no-spawn is set, don't fall back to client mode.
+```
+
+Client mode implements the `find` command as an immediate filesystem scan without a running service.
+
+These options control how the client communicates with the server:
+
+```text
+-p, --persistent           Persist and wait for further responses.
+    --server-encoding=ARG  CLI-to-server encoding: json or bser.
+```
+
+The `--persistent` flag keeps the connection open and is most useful for receiving log output via `log-level`. The `--server-encoding` option controls the wire format between the CLI and the server; you generally do not need to change this.
+
+## Input and output
+
+Most CLI invocations pass a list of arguments:
+
+```bash
+$ watchman watch /path/to/dir
+```
+
+This is converted into a JSON request and sent over the socket:
+
+```json
+["watch", "/path/to/dir"]
+```
+
+You can also send the JSON request directly via stdin using the `-j` flag:
+
+<CodeGroup>
+
+```bash heredoc
+$ watchman -j <<-EOT
+["watch", "/path/to/dir"]
+EOT
+```
+
+```bash here-string
+$ watchman -j <<< '["watch", "/path/to/dir"]'
+```
+
+```bash pipe
+$ echo '["watch", "/path/to/dir"]' | watchman -j
+```
+
+```bash file
+$ echo '["watch", "/path/to/dir"]' > cmd.json
+$ watchman -j < cmd.json
+```
+
+</CodeGroup>
+
+The `--json-command` flag is an alias for `-j`.
+
+Since version 3.8, the `-j` flag also accepts BSER as input. When a BSER stream is detected, `--server-encoding=bser` and `--output-encoding=bser` are implicitly set unless you have already specified them.
+
+### Output encoding
+
+```text
+--output-encoding=ARG   CLI output encoding: json (default) or bser.
+--no-pretty             Don't pretty-print JSON output.
+```
+
+JSON output is pretty-printed by default. Use `--no-pretty` when processing output programmatically — it is more efficient and avoids unnecessary whitespace.
+
+## Exit status
+
+Watchman exits with status `0` in most cases, even when a command fails. A zero exit status means the output is valid JSON. To check whether a command succeeded, parse the JSON response and inspect the `error` field.
+
+Watchman exits with a non-zero status only for low-level failures such as a terminated connection. In those cases an unstructured error message is written to `stderr` instead of `stdout`.
+
+```bash
+$ watchman watch /nonexistent/path
+{
+  "version": "2023-01-01",
+  "error": "unable to resolve root /nonexistent/path: No such file or directory"
+}
+```
+
+## Server options
+
+Server options are recognized by the client and affect how it starts the server. They have no effect if the server is already running. To apply new server options, stop the server first:
+
+```bash
+$ watchman shutdown-server
+```
+
+### State file
+
+By default Watchman remembers all watches, triggers, and subscriptions across restarts. This state is stored in a file:
+
+```text
+--statefile=PATH     Specify path to file to hold watch and trigger state.
+-n, --no-save-state  Don't save state between invocations.
+```
+
+The default statefile location is `<STATEDIR>/<USER>.state`. Older versions may store it at `<TMPDIR>/.watchman.<USER>.state`.
+
+### Log file and log level
+
+```text
+-o, --logfile=PATH   Specify path to logfile.
+    --log-level      Set log verbosity: 0 = off, 1 = default, 2 = verbose.
+```
+
+The default log file location is `<STATEDIR>/<USER>.log`. Older versions may store it at `<TMPDIR>/.watchman.<USER>.log`. Since version 3.8, the log is placed at `<STATEDIR>/log`, typically `<PREFIX>/var/run/watchman/<USER>-state/log`.
+
+### Foreground mode
+
+```text
+-f, --foreground   Run the service in the foreground without daemonizing.
+```
+
+Useful in test harnesses or when you need to observe server output directly.
+
+### inetd mode
+
+_Since 4.6._
+
+```text
+--inetd   Use stdin as the listening socket (inetd/systemd socket activation).
+```
+
+When this flag is set, Watchman uses `stdin` as the listening socket rather than creating one itself. This allows a supervisor such as `systemd` to manage the socket and defer activating Watchman until a client connects.

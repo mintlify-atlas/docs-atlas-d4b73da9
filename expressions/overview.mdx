@@ -1,0 +1,87 @@
+---
+title: "Watchman query expression terms: complete overview"
+description: "Learn how Watchman expression terms filter file query results, with a reference table of all available terms and a combined expression example."
+---
+
+Watchman queries use expressions to filter the set of files produced by a generator. After a generator selects candidate files (for example, all files that changed since a given clock), the expression is evaluated against each candidate to decide whether to include it in the result. Expressions can range from a simple type check to deeply nested logical combinations.
+
+## Term format
+
+Every expression term is a JSON array whose first element is the term name as a string. Subsequent elements are the term's arguments:
+
+```json
+["termname", arg1, arg2]
+```
+
+Terms that take no arguments can be written as a plain string instead of an array:
+
+```json
+"true"
+```
+
+Both `"true"` and `["true"]` are equivalent.
+
+## Wholename vs basename
+
+Many terms can match against either the **basename** (the file's name without its directory path) or the **wholename** (the relative path from the watch root). Unless a term's documentation says otherwise, matching defaults to the basename.
+
+```json
+["match", "*.txt"]
+["match", "src/*.txt", "wholename"]
+```
+
+## Expression term reference
+
+| Term | Category | Description |
+|---|---|---|
+| [`match`](/expressions/match-name) | Pattern | Glob-style match against basename or wholename |
+| [`imatch`](/expressions/match-name) | Pattern | Case-insensitive variant of `match` |
+| [`name`](/expressions/match-name) | Pattern | Exact filename match, single or multiple names |
+| [`iname`](/expressions/match-name) | Pattern | Case-insensitive variant of `name` |
+| [`pcre`](/expressions/match-name) | Pattern | Perl Compatible Regular Expression match |
+| [`ipcre`](/expressions/match-name) | Pattern | Case-insensitive variant of `pcre` |
+| [`suffix`](/expressions/match-name) | Pattern | Match by file extension, single or set |
+| [`dirname`](/expressions/match-name) | Pattern | Match files by parent directory path and depth |
+| [`idirname`](/expressions/match-name) | Pattern | Case-insensitive variant of `dirname` |
+| [`type`](/expressions/type-size) | File type | Match by file type character (file, dir, symlink, …) |
+| [`size`](/expressions/type-size) | File size | Relational comparison of file size in bytes |
+| [`exists`](/expressions/type-size) | Existence | True if the file has not been deleted |
+| [`empty`](/expressions/type-size) | Existence | True if the file is empty or is an empty directory |
+| [`allof`](/expressions/logical-operators) | Logic | AND — all sub-expressions must be true |
+| [`anyof`](/expressions/logical-operators) | Logic | OR — at least one sub-expression must be true |
+| [`not`](/expressions/logical-operators) | Logic | Negates a single sub-expression |
+| [`true`](/expressions/logical-operators) | Logic | Always evaluates to true |
+| [`false`](/expressions/logical-operators) | Logic | Always evaluates to false |
+| [`since`](/expressions/time-based) | Time | True if a file's time field is newer than a clockspec |
+
+## Combined expression example
+
+The following expression matches all non-empty `.ts` or `.tsx` source files that live somewhere under the `src/` directory:
+
+```json
+["allof",
+  ["dirname", "src"],
+  ["suffix", ["ts", "tsx"]],
+  ["not", "empty"],
+  "exists"
+]
+```
+
+The `allof` term short-circuits evaluation: as soon as one sub-expression returns false, the remaining sub-expressions are skipped.
+
+## Explore by category
+
+<Columns cols={2}>
+  <Card title="Name and pattern matching" icon="magnifying-glass" href="/expressions/match-name">
+    Glob, exact name, regular expression, suffix, and dirname terms.
+  </Card>
+  <Card title="File type and size filters" icon="filter" href="/expressions/type-size">
+    Match by file type character or compare file size with relational operators.
+  </Card>
+  <Card title="Logical operators" icon="code-branch" href="/expressions/logical-operators">
+    Combine expressions with AND, OR, NOT, and the always-true/false constants.
+  </Card>
+  <Card title="Time-based expressions" icon="clock" href="/expressions/time-based">
+    Filter files by modification or change time using a clockspec or Unix timestamp.
+  </Card>
+</Columns>

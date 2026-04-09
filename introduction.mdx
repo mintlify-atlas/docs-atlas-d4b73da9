@@ -1,0 +1,64 @@
+---
+title: "Watchman: OS-native file change monitoring service"
+description: "Watchman monitors files and directories for changes, triggering actions or notifications using OS-native events on Linux, macOS, and Windows."
+---
+
+Watchman is an open-source file watching service developed at Meta. It monitors your filesystem for changes and can notify clients or execute commands automatically when files are created, modified, or deleted. Unlike polling-based solutions, Watchman uses OS-native mechanisms — `inotify` on Linux, `FSEvents` on macOS, and `ReadDirectoryChangesW` on Windows — for low-latency, efficient file change detection at scale.
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Watchman on macOS, Linux, or Windows using prebuilt binaries or package managers
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Watch a directory, query for changes, and set up your first subscription in minutes
+  </Card>
+  <Card title="File Queries" icon="magnifying-glass" href="/guides/file-queries">
+    Use generators and expressions to query files by time, pattern, type, or path
+  </Card>
+  <Card title="Command Reference" icon="terminal" href="/commands/watch-project">
+    Browse the complete reference for all Watchman CLI commands and flags
+  </Card>
+</CardGroup>
+
+## Why Watchman?
+
+Watchman was built to handle large codebases at Meta scale — millions of files, hundreds of concurrent clients, and sub-millisecond notification latency. It provides:
+
+- **OS-native events**: No polling; uses `inotify`, `FSEvents`, or `kqueue` depending on your platform
+- **Persistent service**: Runs as a long-lived background process per user, maintaining a live index of watched directories
+- **Flexible queries**: A composable expression system filters files by name, type, size, modification time, and more
+- **Subscriptions**: Push-based change notifications delivered over a Unix socket
+- **Source control awareness**: Minimizes noise during large rebases and merges using merge-base tracking
+- **Multi-language clients**: Official libraries for Node.js, Python, C++, Java, Ruby, and Rust
+
+## How it works
+
+Watchman runs as a background service that you interact with via the `watchman` CLI or through client libraries. The service maintains an in-memory index of watched directory trees and uses OS-native file change events to keep it current. Clients query or subscribe to this index over a Unix domain socket using a JSON or BSER protocol.
+
+<CardGroup cols={2}>
+  <Card title="Subscriptions" icon="bell" href="/guides/subscriptions">
+    Receive push notifications whenever matching files change
+  </Card>
+  <Card title="Triggers" icon="bolt" href="/guides/triggers">
+    Automatically execute commands when files matching a pattern change
+  </Card>
+  <Card title="Client Libraries" icon="code" href="/clients/nodejs">
+    Use official clients for Node.js, Python, C++, Java, and more
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/troubleshooting">
+    Resolve common issues with system limits, recrawls, and FSEvents
+  </Card>
+</CardGroup>
+
+## Supported platforms
+
+| Platform | Notification mechanism | Support level |
+|----------|----------------------|---------------|
+| Linux | `inotify` | Officially supported |
+| macOS | `FSEvents` (10.7+), `kqueue` (older) | Officially supported |
+| Windows 10+ (64-bit) | `ReadDirectoryChangesW` | Officially supported |
+| FreeBSD, OpenBSD | `kqueue` | Community maintained |
+
+<Note>
+  Watchman does not support remote or distributed filesystems (NFS, CIFS, SMB). Use it only on local filesystems where OS-native change events are available.
+</Note>

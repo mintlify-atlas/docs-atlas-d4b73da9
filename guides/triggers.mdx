@@ -1,0 +1,257 @@
+---
+title: "Automating commands with persistent Watchman triggers"
+description: "Use Watchman triggers to automatically spawn commands when files change, with persistent registration, stdin file delivery, and environment variables."
+---
+
+Triggers are Watchman's mechanism for running external commands automatically when files change. When files matching a trigger's expression are detected, Watchman spawns the configured command and passes the list of changed files to it via stdin. Unlike subscriptions, triggers are persistent: they survive Watchman process restarts and do not require a connected client to remain active.
+
+## Triggers vs subscriptions
+
+| | Triggers | Subscriptions |
+|---|---------|--------------|
+| Persistence | Saved across restarts | Lives for the duration of the connection |
+| Notification model | Spawns a child process | Pushes PDUs over a socket |
+| Output | Redirected to Watchman log (by default) | Handled by client code |
+| Best for | Automation scripts, build hooks | Long-lived applications, dev tools |
+
+Watchman batches file change events and waits for the filesystem to settle before invoking a trigger command. This prevents the command from being invoked repeatedly during a burst of related changes. Only one instance of the command runs at a time: if files change while the command is executing, Watchman re-evaluates the trigger after the command exits and spawns a new instance if needed.
+
+## Registering a trigger
+
+### Extended syntax
+
+The extended JSON syntax is available since Watchman 2.9.7 and provides full control over the trigger configuration.
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/root", {
+  "name": "rebuild-on-change",
+  "expression": ["pcre", "\\.(js|ts|css)$"],
+  "command": ["make", "build"]
+}]
+EOT
+```
+
+The trigger object supports the following fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique trigger name. Re-registering with the same name replaces the existing trigger. |
+| `command` | Yes | Array of strings forming the argv for the spawned process. |
+| `expression` | No | Query expression to filter changed files. Omitting it matches all changes. |
+| `stdin` | No | How to deliver files to the command's stdin (see below). |
+| `stdout` | No | Redirect stdout: `">file"` truncates, `">>file"` appends. |
+| `stderr` | No | Redirect stderr the same way as `stdout`. |
+| `append_files` | No | Append matched file names to the `command` array as arguments. |
+| `max_files_stdin` | No | Maximum number of files to deliver on stdin. |
+| `chdir` | No | Working directory for the command, relative to the watch root. |
+| `relative_root` | No | Evaluate the query relative to this subdirectory of the watch root. |
+
+### Simple syntax
+
+The simple syntax is easier to use from the CLI for quick setups:
+
+```bash
+watchman -- trigger /path/to/root triggername '*.js' -- ls -l
+```
+
+Note the leading `--` that separates watchman CLI flags from the pattern/command separator. In JSON:
+
+```json
+["trigger", "/home/user/www", "jsfiles", "*.js", "--", "ls", "-l"]
+```
+
+The simple syntax sets `append_files: true` and configures stdin to deliver `["name", "exists", "new", "size", "mode"]`.
+
+## Delivering the file list via stdin
+
+The `stdin` property controls how Watchman delivers the list of changed files to the spawned command.
+
+**`/dev/null`** (default): stdin is empty.
+
+```json
+{ "stdin": "/dev/null" }
+```
+
+**Array of field names**: Watchman writes a JSON array of objects to stdin, one per changed file.
+
+```json
+{ "stdin": ["name", "size", "exists"] }
+```
+
+The command receives on stdin:
+
+```json
+[
+  {"name": "src/index.js", "size": 1024, "exists": true},
+  {"name": "src/utils.js", "size": 512, "exists": true}
+]
+```
+
+If the field list contains only `"name"`, the JSON is a flat array of strings:
+
+```json
+["src/index.js", "src/utils.js"]
+```
+
+**`NAME_PER_LINE`**: Watchman writes one file name per line to stdin, with no quoting. This is compatible with `xargs(1)`.
+
+```json
+{ "stdin": "NAME_PER_LINE" }
+```
+
+<Tip>Use `NAME_PER_LINE` with `xargs` when you need to run a command once per file and the file list might exceed system argument length limits.</Tip>
+
+## Environment variables
+
+Watchman exports the following environment variables for every trigger invocation:
+
+| Variable | Description |
+|----------|-------------|
+| `WATCHMAN_ROOT` | Absolute path to the watched root |
+| `WATCHMAN_SOCK` | Path to the Watchman socket |
+| `WATCHMAN_TRIGGER` | Name of the trigger |
+| `WATCHMAN_CLOCK` | Clock value at the time of invocation |
+| `WATCHMAN_SINCE` | Clock from the previous invocation, or unset on the first run |
+| `WATCHMAN_FILES_OVERFLOW` | Set to `true` if the file list was truncated |
+| `WATCHMAN_RELATIVE_ROOT` | Full path of the relative root (if `relative_root` is set) |
+
+`WATCHMAN_SINCE` is useful for incremental processing: compare it to `WATCHMAN_CLOCK` to know the window of changes your command should handle.
+
+## Practical examples
+
+### Auto-rebuild on source change
+
+Run `make` whenever C/C++ source or header files change:
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/project", {
+  "name": "c-rebuild",
+  "expression": ["pcre", "\\.(c|cpp|h|hpp)$"],
+  "command": ["make"],
+  "stdout": ">>watchman-build.log",
+  "stderr": ">>watchman-build.log"
+}]
+EOT
+```
+
+### Run tests on JS changes
+
+Run a test script for each changed file, passing file names on stdin one per line:
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/project", {
+  "name": "js-tests",
+  "expression": ["allof",
+    ["type", "f"],
+    ["match", "src/**/*.test.js", "wholename"]
+  ],
+  "command": ["xargs", "npx", "jest", "--"],
+  "stdin": "NAME_PER_LINE"
+}]
+EOT
+```
+
+### Scoped trigger using `relative_root`
+
+Trigger `make` only for changes inside a specific subdirectory:
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/monorepo", {
+  "name": "frontend-build",
+  "expression": ["pcre", "\\.(js|css)$"],
+  "command": ["make", "build"],
+  "relative_root": "packages/frontend"
+}]
+EOT
+```
+
+<Note>When `relative_root` is set, `WATCHMAN_ROOT` still reflects the actual watch root. The relative root's full path is available in `WATCHMAN_RELATIVE_ROOT`.</Note>
+
+## Managing triggers
+
+### Listing registered triggers
+
+```bash
+watchman trigger-list /path/to/root
+```
+
+This returns all trigger objects currently registered for the given root in the same format used by the `trigger` command.
+
+### Deleting a trigger
+
+```bash
+watchman trigger-del /path/to/root triggername
+```
+
+This removes the trigger from both the in-memory state and the saved state, so it will not be restored after a restart.
+
+## Persistence across restarts
+
+Unless Watchman is started with `--no-save-state`, triggers are saved to disk and re-established automatically after a Watchman process restart. This means your automation keeps running even if Watchman is updated or the process is killed.
+
+<Warning>If you registered triggers before Watchman 2.9.7, those triggers will be forgotten when upgrading past that version. Re-register them after the upgrade.</Warning>
+
+## `watchman-make` — trigger-based build automation
+
+`watchman-make` is a convenience wrapper that uses Watchman triggers to automatically invoke build tools as you save files. It runs in the foreground and passes output through to your terminal.
+
+```bash
+watchman-make -p '**/*.c' '**/*.h' 'Makefile*' -t all
+```
+
+You can define multiple independent targets, each with its own set of patterns:
+
+```bash
+watchman-make \
+  -p '**/*.c' '**/*.h' -t all \
+  -p 'tests/**/*.py' 'tests/**/*.c' -t integration
+```
+
+To use a build tool other than `make`, pass `--make`:
+
+```bash
+watchman-make -p '**/*.ts' --make npx -t tsc
+```
+
+To run an arbitrary script instead of a make target, use `--run`:
+
+```bash
+watchman-make -p '**/*.c' '**/*.h' --run ./build.sh
+```
+
+`watchman-make` requires `pywatchman` and Python to be installed.
+
+## `watchman-wait` — wait for file changes in shell scripts
+
+`watchman-wait` blocks until a file change is detected, then prints one event per line and exits. It is suitable for shell scripts that need to react to a single change.
+
+```bash
+watchman-wait /path/to/watch
+```
+
+Wait for a `.so` file to appear in the current directory:
+
+```bash
+watchman-wait . -p '*.so'
+```
+
+Control how long to wait and how many events to process:
+
+```bash
+# Wait up to 30 seconds for at most 5 events
+watchman-wait /path/to/watch --timeout 30 --max-events 5
+```
+
+Pass `--max-events 0` to run continuously. Use `--fields` to control the output columns and `--separator` to change the delimiter:
+
+```bash
+watchman-wait . --fields name,size --separator ','
+```
+
+Exit codes: `0` on success, `1` on runtime error, `2` on timeout, `3` on interrupt.
+
+`watchman-wait` requires `pywatchman` and Python to be installed.

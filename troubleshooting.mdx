@@ -1,0 +1,229 @@
+---
+title: "Troubleshooting Watchman: recrawls, errors, and limits"
+description: "Diagnose and fix Watchman recrawls, inotify overflow, FSEvents errors on macOS, poison states, and React Native watcher startup timeouts."
+---
+
+Watchman includes directed advice in its error output, linking to specific sections of this page with context on what triggered the issue. The most common underlying cause is hitting OS resource limits — finite resources are available for filesystem watching, and exceeding them degrades performance or breaks correctness.
+
+Before diagnosing any issue, make sure you are on the latest version of Watchman to rule out known bugs. If you are using a distribution-provided binary, you may need to build from source.
+
+<AccordionGroup>
+
+<Accordion title="Recrawl: inotify queue overflow (Linux)">
+
+A recrawl is a full recursive scan of a watched directory tree, triggered when Watchman believes it has lost sync with the filesystem.
+
+On Linux, the most common cause is that the kernel's inotify event queue fills up faster than Watchman can drain it. When overflow occurs, the kernel emits `IN_Q_OVERFLOW`, and Watchman has no choice but to rescan the entire tree. This marks all files as changed and propagates the change to all clients, causing unnecessary work across your toolchain.
+
+**Why it happens:**
+
+The default inotify limits are sized conservatively. If your watched roots are generating changes faster than the kernel can buffer and relay to Watchman, the queue overflows.
+
+**How to resolve it:**
+
+Review your system's inotify limits and raise them. There is no universal formula — larger limits use more kernel memory, so work with your system administrator to find a balance appropriate for your workload.
+
+Check the [installation docs](/installation) for platform-specific preparation instructions, including how to increase `fs.inotify.max_queued_events`, `fs.inotify.max_user_watches`, and `fs.inotify.max_user_instances`.
+
+**Clearing the warning after changing limits:**
+
+The recrawl warning stays until you cancel and reinstate the watch, or restart Watchman:
+
+```bash
+$ watchman shutdown-server
+```
+
+Then re-establish your watch on the next query.
+
+</Accordion>
+
+<Accordion title="kFSEventStreamEventFlagUserDropped (macOS)">
+
+macOS has an internal buffer for FSEvents notifications. When that buffer is exhausted, the kernel sets `kFSEventStreamEventFlagUserDropped` on the next event, signaling that some events were dropped. Watchman responds by performing a recrawl.
+
+If you see a message like:
+
+```text
+Recrawled this watch 1 time, most recently because:
+/some/path: kFSEventStreamEventFlagUserDropped
+```
+
+you are hitting macOS kernel limits. There is no direct control over the buffer size, but you can reduce the rate at which events are delivered by increasing the `fsevents_latency` option in your `.watchmanconfig`. A higher latency allows the system to batch more events together before delivering them, reducing the risk of overflow.
+
+```json
+{
+  "fsevents_latency": 0.1
+}
+```
+
+You can also try enabling `prefer_split_fsevents_watcher` if your workload involves heavy writes to a top-level directory that is listed in `ignore_dirs`.
+
+**Clearing the warning:**
+
+```bash
+$ watchman shutdown-server
+```
+
+Re-establish your watch on the next query.
+
+</Accordion>
+
+<Accordion title="Where are the logs?">
+
+Watchman logs are written to a file named `<USER>.log` inside the state directory.
+
+**Since version 3.8**, the log file is at:
+
+```text
+<PREFIX>/var/run/watchman/<USER>-state/log
+```
+
+On a Homebrew installation, `<PREFIX>` is typically `/usr/local`, so:
+
+```text
+/usr/local/var/run/watchman/<USER>-state/log
+```
+
+**Older versions** may place logs at:
+
+```text
+<TMPDIR>/.watchman.<USER>.log
+```
+
+or
+
+```text
+<PREFIX>/var/run/watchman/<USER>.log
+```
+
+You can override the log location with the `--logfile` server option. See [CLI options](/cli-options#log-file-and-log-level) for details, and [Default locations](/cli-options#default-locations) for an explanation of `<STATEDIR>`, `<TMPDIR>`, and `<USER>`.
+
+</Accordion>
+
+<Accordion title="Poison: inotify_add_watch — cannot allocate memory">
+
+<Warning>
+  This is a non-recoverable state. All Watchman requests will fail until the underlying problem is resolved and the process is restarted.
+</Warning>
+
+If you encounter this message:
+
+```text
+A non-recoverable condition has triggered.  Watchman needs your help!
+The triggering condition was at timestamp=1407695600: inotify-add-watch(/my/path) -> Cannot allocate memory
+All requests will continue to fail with this message until you resolve
+the underlying problem.
+```
+
+the kernel was unable to add an inotify watch for one or more directories. Watchman considers this non-recoverable because it cannot guarantee correct results while this condition exists. All watches — not just the one that triggered the error — are blocked until the process is restarted.
+
+**Causes:**
+
+1. The user limit on total inotify watches was reached, or the kernel could not allocate a needed resource.
+2. Insufficient kernel memory was available.
+
+**Resolving cause 1:** Raise your inotify limits. See the [installation docs](/installation) for platform-specific instructions.
+
+**Resolving cause 2:** Your workload is exceeding available RAM. Tuning other system limits to free memory may help, or you may need to add more RAM.
+
+**Clearing the error:**
+
+_Since version 4.6:_
+
+```bash
+$ watchman watch-del-all
+$ watchman shutdown-server
+```
+
+_Before version 4.6:_
+
+```bash
+$ rm <STATEDIR>/state
+$ watchman --no-spawn --no-local shutdown-server
+```
+
+If you have not resolved the root cause, Watchman will enter this state again the next time limits are exceeded.
+
+</Accordion>
+
+<Accordion title="Poison: opendir — too many open files">
+
+<Warning>
+  This is a non-recoverable state. All Watchman requests will fail until the underlying problem is resolved and the process is restarted.
+</Warning>
+
+If you encounter this message:
+
+```text
+A non-recoverable condition has triggered.  Watchman needs your help!
+The triggering condition was at timestamp=1407695600: opendir(/my/path) -> Too many open files in system
+All requests will continue to fail with this message until you resolve
+the underlying problem.
+```
+
+the entire system ran out of open file descriptors. This is not a filesystem-watching limit — it indicates that one or more processes on the system are consuming all available file handles, or that your system's global open file limit is too low.
+
+**How to resolve:**
+
+Follow the same steps as for [Poison: inotify_add_watch](#) to restart Watchman. Then identify and remediate whatever is consuming file descriptors — this is often a runaway process. Your system administrator can help identify the source and increase limits if needed.
+
+</Accordion>
+
+<Accordion title="FSEvents: register_with_server error (macOS)">
+
+If Watchman reports `FSEventStreamStart failed` or the log file contains:
+
+```text
+FSEventStreamStart: register_with_server: ERROR: f2d_register_rpc() => (null) (-21)
+```
+
+the macOS FSEvents service has gotten into a bad state. This error is opaque — Apple does not document it publicly — but likely causes include too many concurrent FSEvents clients, or one or more misbehaving clients corrupting the service.
+
+**Resolution steps (try in order):**
+
+1. Avoid overlapping watches. Watch only the root of a project, not sub-trees within it. Use the `root_files` and `enforce_root_files` config options to restrict Watchman to project roots.
+2. Restart applications that use FSEvents — editors like Sublime Text, TextMate, or any Node.js tooling using `chokidar` or native FSEvents. Where possible, consolidate file watching through Watchman itself using `fb-watchman`.
+3. Restart the FSEvents daemon:
+   ```bash
+   $ sudo pkill -9 -x fseventsd
+   ```
+4. Restart your computer.
+
+</Accordion>
+
+<Accordion title="Triggers and subscriptions not firing (macOS FSEvents bug)">
+
+There is a rare FSEvents kernel bug where file change notifications stop working entirely for directories whose names have a case inconsistency between the kernel's internal representation and the on-disk name.
+
+**Testing for this issue:**
+
+Use the [find-fsevents-bugs](https://github.com/andreyvit/find-fsevents-bugs) tool to check whether your directory tree is affected.
+
+**Resolving it:**
+
+Rename the directories highlighted by the tool. The rename forces the kernel to reconcile the case mismatch.
+
+**Further reading:**
+
+- [LiveReload knowledge base article on the macOS FSEvents bug](http://feedback.livereload.com/knowledgebase/articles/86239-os-x-fsevents-bug-may-prevent-monitoring-of-certai)
+- [Issue for the Ruby fsevent module](https://github.com/thibaudgg/rb-fsevent/issues/10)
+
+</Accordion>
+
+<Accordion title="React Native: Watcher took too long to load">
+
+This error was caused by a `umask` issue that incorrectly set permissions on the launchd plist file Watchman uses to set up its service on macOS. The issue was resolved in Watchman version 3.1.
+
+**Resolving it:**
+
+```bash
+$ watchman shutdown-server
+$ brew update
+$ brew reinstall watchman
+```
+
+After reinstalling, restart your React Native packager.
+
+</Accordion>
+
+</AccordionGroup>

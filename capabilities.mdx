@@ -1,0 +1,201 @@
+---
+title: "Watchman capability system and version compatibility"
+description: "Query Watchman for supported commands, terms, and fields using capability tokens to write forward-compatible clients without relying on version numbers."
+---
+
+Watchman has been in continuous production use since it was first written, and its public API is designed to never make incompatible changes. Commands and options are never removed — they may be deprecated, but they continue to work. To help client code adapt to the features available on a given installation without hardcoding version numbers, Watchman provides a capability system.
+
+_Capabilities were introduced in version 3.8._
+
+## What capabilities are
+
+A capability is a named token that indicates whether a specific feature is available in the running Watchman server. Rather than checking `if version >= 3.7`, you check `if capability "wildmatch" is present`. This is more robust because Watchman no longer follows strict semantic versioning — since 2020, releases use date-based version strings.
+
+You can query capabilities using the `version` command, or list all capabilities on the server with `list-capabilities`.
+
+## Capability namespaces
+
+Capabilities follow naming conventions based on the type of feature they describe:
+
+### Commands: `cmd-`
+
+Every Watchman command is represented by a capability with the `cmd-` prefix followed by the command name.
+
+```bash
+$ watchman version --optional cmd-watch-project --required cmd-query
+```
+
+| Example capability | What it indicates |
+|--------------------|------------------|
+| `cmd-watch-project` | The `watch-project` command is available |
+| `cmd-subscribe` | The `subscribe` command is available |
+| `cmd-get-sockname` | The `get-sockname` command is available |
+
+### Expression terms: `term-`
+
+Every query expression term is represented with the `term-` prefix.
+
+| Example capability | What it indicates |
+|--------------------|------------------|
+| `term-match` | The `match` expression term is available |
+| `term-suffix` | The `suffix` expression term is available |
+| `term-size` | The `size` expression term is available |
+
+### File result fields: `field-`
+
+Every field that can appear in query results is represented with the `field-` prefix.
+
+| Example capability | What it indicates |
+|--------------------|------------------|
+| `field-size` | The `size` field is queryable |
+| `field-mtime_ms` | The `mtime_ms` field is available |
+| `field-content.sha1hex` | Content hashing is available |
+
+### Feature enhancements
+
+Some enhancements add options to existing commands rather than introducing new ones. These are assigned capability names manually. The known feature capabilities are:
+
+| Capability name | Since version | Description |
+|-----------------|---------------|-------------|
+| `relative_root` | 3.3 | `relative_root` query option |
+| `wildmatch` | 3.7 | Expanded `match` term with recursive glob support |
+| `suffix-set` | 5.0 | Expanded `suffix` term to support a set of suffixes |
+
+## Querying capabilities
+
+Use the `version` command with `--optional` and `--required` flags to check capabilities:
+
+```bash
+$ watchman version --optional wildmatch --required cmd-watch-project
+```
+
+```json
+{
+  "version": "2023-10-01",
+  "capabilities": {
+    "wildmatch": true,
+    "cmd-watch-project": true
+  }
+}
+```
+
+`--required` capabilities that are absent cause the command to return an error. `--optional` capabilities that are absent return `false` in the capabilities object without an error.
+
+You can also query capabilities programmatically in a JSON request:
+
+```json
+["version", {
+  "optional": ["wildmatch", "suffix-set"],
+  "required": ["cmd-watch-project", "cmd-subscribe"]
+}]
+```
+
+## Listing all capabilities
+
+To see every capability supported by your server:
+
+```bash
+$ watchman list-capabilities
+```
+
+```json
+{
+  "version": "2023-10-01",
+  "capabilities": [
+    "cmd-clock",
+    "cmd-find",
+    "cmd-get-sockname",
+    "cmd-list-capabilities",
+    "cmd-log",
+    "cmd-log-level",
+    "cmd-query",
+    "cmd-shutdown-server",
+    "cmd-since",
+    "cmd-state-enter",
+    "cmd-state-leave",
+    "cmd-subscribe",
+    "cmd-trigger",
+    "cmd-trigger-del",
+    "cmd-trigger-list",
+    "cmd-unsubscribe",
+    "cmd-version",
+    "cmd-watch",
+    "cmd-watch-del",
+    "cmd-watch-del-all",
+    "cmd-watch-list",
+    "cmd-watch-project",
+    "field-cclock",
+    "field-content.sha1hex",
+    "field-ctime",
+    "field-ctime_f",
+    "field-ctime_ms",
+    "field-ctime_us",
+    "field-dev",
+    "field-exists",
+    "field-gid",
+    "field-ino",
+    "field-mode",
+    "field-mtime",
+    "field-mtime_f",
+    "field-mtime_ms",
+    "field-mtime_us",
+    "field-name",
+    "field-new",
+    "field-nlink",
+    "field-oclock",
+    "field-size",
+    "field-symlink_target",
+    "field-type",
+    "field-uid",
+    "relative_root",
+    "suffix-set",
+    "term-allof",
+    "term-anyof",
+    "term-dirname",
+    "term-empty",
+    "term-exists",
+    "term-false",
+    "term-idirname",
+    "term-imatch",
+    "term-iname",
+    "term-match",
+    "term-name",
+    "term-not",
+    "term-pcre",
+    "term-size",
+    "term-suffix",
+    "term-true",
+    "term-type",
+    "wildmatch"
+  ]
+}
+```
+
+## Writing forward-compatible client code
+
+Instead of checking version numbers, always check for the specific capability you need:
+
+```javascript
+const watchman = require('fb-watchman');
+const client = new watchman.Client();
+
+client.capabilityCheck(
+  { optional: ['wildmatch'], required: ['relative_root'] },
+  (error, resp) => {
+    if (error) {
+      console.error('capability check failed:', error);
+      return;
+    }
+
+    if (resp.capabilities['wildmatch']) {
+      // use recursive glob patterns in match expressions
+    } else {
+      // fall back to non-recursive patterns
+    }
+  }
+);
+```
+
+<Tip>
+  Prefer `--optional` for capabilities that enable better behavior but have a working fallback, and `--required` only for capabilities that your client absolutely cannot function without.
+</Tip>

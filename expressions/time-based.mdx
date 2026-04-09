@@ -1,0 +1,89 @@
+---
+title: "Time-based file filtering with the since expression"
+description: "Reference for Watchman's since expression term, which filters files by modification or change time using a clockspec, Unix timestamp, or named cursor."
+---
+
+Watchman's `since` expression term lets you filter files based on when they were last modified or when a change was first observed. It compares a file's time field against a clockspec — a value that represents a point in Watchman's internal clock sequence or a Unix timestamp. This is distinct from the `since` *generator*, which selects candidate files using a time index rather than evaluating each file individually.
+
+## since
+
+The `since` expression evaluates to true when the specified time field of the file is more recent than the given clockspec.
+
+### Using a clock ID (observed clock)
+
+Pass a Watchman clock ID to compare against the internal observed change clock (`oclock`). This is the default when no field name is given:
+
+```json
+["since", "c:12345:234"]
+```
+
+This is equivalent to explicitly specifying `"oclock"`:
+
+```json
+["since", "c:12345:234", "oclock"]
+```
+
+### Using a Unix timestamp with mtime or ctime
+
+Pass an integer Unix timestamp and name the filesystem field you want to compare:
+
+```json
+["since", 1234566800, "mtime"]
+["since", 1234566800, "ctime"]
+```
+
+- `mtime` — the file's last modification time as recorded by the filesystem.
+- `ctime` — the file's last status change time (permissions, ownership, and so on).
+
+### Using clock values explicitly
+
+You can name the Watchman clock fields directly. Both Unix timestamps and clock ID strings are accepted:
+
+```json
+["since", 1234566800, "oclock"]
+["since", "c:1234:123", "oclock"]
+["since", 1234566800, "cclock"]
+["since", "c:1234:2342", "cclock"]
+```
+
+- `oclock` — the last observed change clock value (when the file was last seen to change).
+- `cclock` — the clock value when the file first came into existence (created clock).
+
+## since expression vs. since generator
+
+The `since` *generator* and the `since` *expression term* both involve time, but they work differently:
+
+| | since generator | since expression |
+|---|---|---|
+| Role | Selects candidate files | Filters already-selected candidates |
+| Mechanism | Uses Watchman's time index | Evaluates each file's time field directly |
+| Behavior on first use | Returns only currently existing files (fresh instance) | Evaluates each file individually |
+| Efficiency | Generally faster for large trees | Can be expensive if applied to a large candidate set |
+
+<Tip>
+The `since` generator is usually more efficient. Use the `since` expression term when you need fine-grained control — for example, when your generator produces candidates by suffix and you then want to filter that set by modification time.
+</Tip>
+
+## Examples
+
+Find files modified after a given Unix timestamp:
+
+```json
+["since", 1700000000, "mtime"]
+```
+
+Find files whose status changed after a clock ID (useful after a known Watchman event):
+
+```json
+["since", "c:1234:567", "oclock"]
+```
+
+Combine with other terms to find recently modified JavaScript files that still exist:
+
+```json
+["allof",
+  ["suffix", "js"],
+  "exists",
+  ["since", 1700000000, "mtime"]
+]
+```

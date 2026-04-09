@@ -1,0 +1,48 @@
+---
+title: "trigger-del — delete a named trigger from a watched root"
+description: "Delete a named trigger from a watched root, stopping it from firing and removing it from both the in-memory and the persisted saved state."
+---
+
+The `trigger-del` command removes a named trigger from the list of registered triggers on a watched root. The trigger stops firing immediately and is removed from both the in-memory trigger set and the saved state file, so it will not be re-established after a Watchman restart.
+
+## Syntax
+
+```bash
+watchman trigger-del <root> <triggername>
+```
+
+**JSON protocol**
+
+```json
+["trigger-del", "<root>", "<triggername>"]
+```
+
+## Example
+
+```bash
+watchman trigger-del /path/to/root assets
+```
+
+**Response**
+
+```json
+{
+  "version": "2.9.7",
+  "deleted": true,
+  "trigger": "assets"
+}
+```
+
+If the named trigger does not exist, Watchman returns an error.
+
+## Behavior
+
+When `trigger-del` is called:
+
+1. The trigger is immediately removed from the active trigger set for the root — no further invocations will occur.
+2. The trigger is removed from the saved state on disk. It will not be restored if the Watchman server restarts.
+3. Any trigger process that is already running continues to completion; `trigger-del` does not kill in-flight processes.
+
+<Tip>
+  Use [`trigger-list`](/commands/trigger-list) to find the exact name of a trigger before deleting it, especially if the trigger was registered using the simple syntax where the name is positional.
+</Tip>

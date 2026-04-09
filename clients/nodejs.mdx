@@ -1,0 +1,270 @@
+---
+title: "Node.js File Watching with Watchman via fb-watchman"
+description: "Learn how to integrate Watchman file watching into Node.js applications using the fb-watchman npm package for real-time file change notifications."
+---
+
+The `fb-watchman` npm package provides a Node.js client for the Watchman file watching service. It exposes an event-driven API for subscribing to file change notifications, querying directory trees, and checking server capabilities — all over an async connection to the local Watchman daemon.
+
+## Installation
+
+```bash
+npm install fb-watchman
+```
+
+## Getting started
+
+<Steps>
+  <Step title="Import and create a client">
+    ```js
+    var watchman = require('fb-watchman');
+    var client = new watchman.Client();
+    ```
+  </Step>
+
+  <Step title="Check server capabilities">
+    Before issuing commands, verify that the Watchman service is installed and supports the capabilities your application requires.
+
+    ```js
+    client.capabilityCheck(
+      { optional: [], required: ['relative_root'] },
+      function (error, resp) {
+        if (error) {
+          // error is an Error object if the watchman service is not installed,
+          // or if any names in `required` are unsupported by the server.
+          console.error(error);
+          client.end();
+          return;
+        }
+        // resp example: { version: '3.8.0', capabilities: { relative_root: true } }
+        console.log(resp);
+      }
+    );
+    ```
+  </Step>
+
+  <Step title="Initiate a watch">
+    Use `watch-project` to watch a directory. Watchman may consolidate the watch with a higher-level tree, so always record the `relative_path` from the response.
+
+    ```js
+    client.command(['watch-project', dir_of_interest], function (error, resp) {
+      if (error) {
+        console.error('Error initiating watch:', error);
+        return;
+      }
+
+      if ('warning' in resp) {
+        console.log('warning: ', resp.warning);
+      }
+
+      // Store resp.watch and resp.relative_path for use in subscriptions.
+      console.log('watch established on', resp.watch,
+                  'relative_path', resp.relative_path);
+    });
+    ```
+  </Step>
+
+  <Step title="Subscribe to file changes">
+    Issue a `subscribe` command and listen for `subscription` events on the client.
+
+    ```js
+    function make_subscription(client, watch, relative_path) {
+      var sub = {
+        // Match any .js file in the watched directory
+        expression: ['allof', ['match', '*.js']],
+        fields: ['name', 'size', 'mtime_ms', 'exists', 'type'],
+      };
+
+      if (relative_path) {
+        sub.relative_root = relative_path;
+      }
+
+      client.command(['subscribe', watch, 'mysubscription', sub],
+        function (error, resp) {
+          if (error) {
+            console.error('failed to subscribe: ', error);
+            return;
+          }
+          console.log('subscription ' + resp.subscribe + ' established');
+        }
+      );
+
+      client.on('subscription', function (resp) {
+        if (resp.subscription !== 'mysubscription') return;
+
+        resp.files.forEach(function (file) {
+          // Convert Int64 instance to a JavaScript integer
+          const mtime_ms = +file.mtime_ms;
+          console.log('file changed: ' + file.name, mtime_ms);
+        });
+      });
+    }
+    ```
+  </Step>
+</Steps>
+
+## Subscribing only to changed files
+
+By default, a new subscription delivers results for all files that currently match the expression. To receive only files that change _after_ the subscription is established, query the current clock first and pass it as a `since` constraint.
+
+```js
+function make_time_constrained_subscription(client, watch, relative_path) {
+  client.command(['clock', watch], function (error, resp) {
+    if (error) {
+      console.error('Failed to query clock:', error);
+      return;
+    }
+
+    var sub = {
+      expression: ['allof', ['match', '*.js']],
+      fields: ['name', 'size', 'exists', 'type'],
+      since: resp.clock,
+    };
+
+    if (relative_path) {
+      sub.relative_root = relative_path;
+    }
+
+    client.command(['subscribe', watch, 'mysubscription', sub],
+      function (error, resp) {
+        // handle the result here
+      }
+    );
+  });
+}
+```
+
+## Cancelling a subscription
+
+To stop receiving notifications, send the `unsubscribe` command with the subscription name:
+
+```js
+client.command(['unsubscribe', process.cwd(), 'mysubscription']);
+```
+
+Subscription names are scoped to your connection. Multiple clients can use the same subscription name without collision.
+
+---
+
+## API reference
+
+### `client.capabilityCheck(options, done)`
+
+Issues a [`version`](/commands/version) command to query the capabilities of the Watchman server. If the server does not natively support the capabilities protocol, this method synthesizes the response based on the reported version.
+
+**`options` properties:**
+
+| Property   | Type       | Description                              |
+| ---------- | ---------- | ---------------------------------------- |
+| `optional` | `string[]` | Capability names that are nice-to-have.  |
+| `required` | `string[]` | Capability names that must be supported. |
+
+The `done` callback receives `(error, result)`. If any `required` capability is missing, `error` is set with a descriptive message. The result object contains a `capabilities` map keyed by capability name with boolean values.
+
+```js
+client.capabilityCheck(
+  { optional: [], required: ['relative_root'] },
+  function (error, resp) {
+    if (error) {
+      console.error(error);
+    }
+    // { version: '3.8.0', capabilities: { relative_root: true } }
+    console.log(resp);
+  }
+);
+```
+
+---
+
+### `client.command(args [, done])`
+
+Sends a command to the Watchman service. `args` is an array whose first element is the command name, followed by any arguments. Commands are queued and dispatched asynchronously in FIFO order once the connection is established.
+
+The optional `done` callback receives `(error, result)`. Omit it if you are not interested in the response.
+
+```js
+client.command(['watch-project', process.cwd()], function (error, resp) {
+  if (error) {
+    console.log('watch failed: ', error);
+    return;
+  }
+  if ('warning' in resp) {
+    console.log('warning: ', resp.warning);
+  }
+  if ('relative_path' in resp) {
+    console.log('watching project', resp.watch,
+                'relative path to cwd is', resp.relative_path);
+  } else {
+    console.log('watching', resp.watch);
+  }
+});
+```
+
+<Note>
+  If the response contains a `warning` field, the Watchman service is
+  communicating an issue the user should address — for example, adjusting system
+  watch resource limits. Surface this message to the user where possible.
+</Note>
+
+---
+
+### `client.end()`
+
+Terminates the connection to the Watchman service immediately, without waiting for any queued commands to be sent.
+
+---
+
+## Events
+
+The client object is an `EventEmitter` that emits the following events.
+
+### `connect`
+
+Emitted when the client successfully connects to the Watchman service.
+
+### `error`
+
+Emitted when the socket encounters an error, or when the Watchman CLI binary cannot be executed before a connection is established. The handler receives the error object.
+
+### `end`
+
+Emitted when the socket to the Watchman service is closed.
+
+### `log`
+
+Emitted in response to a unilateral `log` PDU from the server. Requires a prior `log-level` command to enable log delivery.
+
+```js
+// Very verbose — use only when debugging
+client.command(['log-level', 'debug']);
+client.on('log', function (info) {
+  console.log(info);
+});
+```
+
+### `subscription`
+
+Emitted in response to a unilateral `subscription` PDU from the server, delivered whenever matching files change. Requires a prior `subscribe` command.
+
+```js
+client.command(
+  ['subscribe', process.cwd(), 'mysubscription', {
+    expression: ['match', '*.js'],
+  }],
+  function (error, resp) {
+    if (error) {
+      console.log('failed to subscribe: ', error);
+      return;
+    }
+    console.log('subscription ' + resp.subscribe + ' established');
+  }
+);
+
+client.on('subscription', function (resp) {
+  console.log(resp.root, resp.subscription, resp.files);
+});
+```
+
+<Info>
+  When you first subscribe, Watchman delivers a list of all current files that
+  match the expression, so you do not need to walk the tree manually on startup.
+</Info>

@@ -1,0 +1,328 @@
+---
+title: "Querying files with Watchman generators and expressions"
+description: "Learn how Watchman's generator and expression system lets you query files by time, suffix, glob pattern, path, or all files with composable filter terms."
+---
+
+Watchman file queries have two distinct stages: a _generator_ selects a candidate set of files from Watchman's in-memory index, and an _expression evaluator_ filters that set down to the files you actually care about. Understanding this split lets you write efficient queries that touch only the data you need.
+
+## Query structure
+
+Every query is a JSON array sent to the `query` command:
+
+```json
+["query", "/path/to/root", {
+  "since": "n:mycursor",
+  "expression": ["type", "f"],
+  "fields": ["name", "size", "mtime_ms"]
+}]
+```
+
+If you omit the `expression` key, all files emitted by the generator are returned. If you omit a generator key (`since`, `suffix`, `glob`, `path`), Watchman uses the `all` generator.
+
+## Generators
+
+<AccordionGroup>
+  <Accordion title="since — files changed after a clock">
+    The `since` generator returns files modified after a [clockspec](/guides/clockspec). Pass a named cursor, a clock ID, or a unix timestamp.
+
+    ```json
+    ["query", "/path/to/root", {
+      "since": "n:mycursor",
+      "expression": ["type", "f"],
+      "fields": ["name"]
+    }]
+    ```
+
+    When the clock value is blank, belongs to a different Watchman process, or refers to an unused named cursor, the query enters _fresh instance_ mode. In fresh instance mode only currently-existing files are returned, and every file node is marked `new: true`.
+
+    Set `empty_on_fresh_instance: true` to receive an empty file list with `is_fresh_instance: true` in the response instead:
+
+    ```json
+    ["query", "/path/to/root", {
+      "since": "",
+      "empty_on_fresh_instance": true,
+      "fields": ["name"]
+    }]
+    ```
+
+    The `since` generator does not follow symlinks and does not track changes to a symlink's target.
+
+    The `since` generator also supports source control aware queries — see [SCM queries](/guides/scm-queries) for details.
+  </Accordion>
+
+  <Accordion title="suffix — files by extension">
+    The `suffix` generator returns all known files with a given extension or set of extensions. Pass a string for a single extension or an array for multiple.
+
+    ```json
+    ["query", "/path/to/root", {
+      "suffix": "js"
+    }]
+    ```
+
+    ```json
+    ["query", "/path/to/root", {
+      "suffix": ["js", "ts", "css"]
+    }]
+    ```
+
+    An empty array produces no files. The generator can produce symlinks but does not follow them.
+  </Accordion>
+
+  <Accordion title="glob — pattern matching">
+    The `glob` generator matches file names against one or more glob patterns. Watchman builds a tree from the patterns and walks both the expression tree and the in-memory filesystem tree concurrently, which makes this efficient for narrow queries.
+
+    ```json
+    ["query", "/path/to/root", {
+      "glob": ["src/*.c", "src/*.h"],
+      "fields": ["name"]
+    }]
+    ```
+
+    Use `**` for recursive matching:
+
+    ```json
+    ["query", "/path/to/root", {
+      "glob": ["**/*.ts", "**/*.tsx"],
+      "fields": ["name"]
+    }]
+    ```
+
+    <Tip>For broadly scoped recursive queries, the `suffix` generator combined with a `dirname` expression term is generally more efficient than `**` globs, because it results in fewer comparisons.</Tip>
+
+    The `glob` generator implicitly enables `dedup_results`. It can produce symlinks but does not follow them. An empty array produces no files.
+  </Accordion>
+
+  <Accordion title="path — directory depth">
+    The `path` generator returns files at a given path and optional depth. Each path specifier can be a string (infinite depth) or an object with `path` and `depth` keys.
+
+    A `depth` of `0` returns only files directly inside the path. A `depth` of `-1` means unlimited depth, which is the same as omitting `depth`.
+
+    These two queries are equivalent:
+
+    ```json
+    ["query", "/path/to/root", {
+      "path": ["bar"]
+    }]
+    ```
+
+    ```json
+    ["query", "/path/to/root", {
+      "path": [{"path": "bar", "depth": -1}]
+    }]
+    ```
+
+    Limit depth to one level:
+
+    ```json
+    ["query", "/path/to/root", {
+      "path": [{"path": "src", "depth": 0}]
+    }]
+    ```
+
+    Paths are relative to the watch root. The generator can produce symlinks but does not follow them. An empty array produces no files.
+  </Accordion>
+
+  <Accordion title="all — every known file">
+    The `all` generator produces every file node in Watchman's index for the watched root. It is the default when no other generator is specified.
+
+    ```json
+    ["query", "/path/to/root", {}]
+    ```
+
+    Combine it with an expression to filter the full set:
+
+    ```json
+    ["query", "/path/to/root", {
+      "expression": ["suffix", "py"]
+    }]
+    ```
+
+    The `all` generator can produce symlinks but does not follow them.
+  </Accordion>
+</AccordionGroup>
+
+## De-duplicating results
+
+If you specify multiple generators, or configure the `path` generator with overlapping paths, Watchman may emit the same file more than once. Enable `dedup_results` to remove duplicates:
+
+```json
+["query", "/path/to/root", {
+  "path": ["src", "src/lib"],
+  "dedup_results": true
+}]
+```
+
+<Note>The `glob` generator always enables `dedup_results` automatically. You can test for this feature by checking for the `dedup_results` capability in the `version` command response.</Note>
+
+## Expressions
+
+An expression filters the files emitted by the generator. Watchman evaluates the expression against each file and includes only those that return `true`.
+
+An expression term is a JSON array whose first element is the term name:
+
+```json
+["termname", arg1, arg2]
+```
+
+Terms that take no arguments can be written as a bare string:
+
+```json
+"true"
+```
+
+### Wholename vs basename
+
+Expression terms that match against file names operate on either the _basename_ (the file name within its directory) or the _wholename_ (the path relative to the watch root). Specify which by passing `"wholename"` or `"basename"` as the last argument to the term:
+
+```json
+["match", "*.js", "basename"]
+```
+
+```json
+["match", "src/*.js", "wholename"]
+```
+
+### Composing expressions
+
+Use `allof`, `anyof`, and `not` to build compound expressions:
+
+```json
+["allof",
+  ["type", "f"],
+  ["not", "empty"],
+  ["anyof",
+    ["suffix", "js"],
+    ["suffix", "ts"]
+  ]
+]
+```
+
+## The `fields` parameter
+
+By default Watchman returns a rich set of file metadata. Use the `fields` parameter to request only the fields you need, which reduces the size of the response.
+
+```json
+["query", "/path/to/root", {
+  "suffix": "js",
+  "fields": ["name", "exists", "mtime_ms"]
+}]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Path relative to the watch root (or `relative_root`) |
+| `exists` | boolean | `true` if the file exists on disk |
+| `cclock` | string | Clock value when the file was first observed |
+| `oclock` | string | Clock value when the file was last changed |
+| `ctime` / `ctime_ms` / `ctime_us` / `ctime_ns` / `ctime_f` | number | Inode change time at various precisions |
+| `mtime` / `mtime_ms` / `mtime_us` / `mtime_ns` / `mtime_f` | number | Last modified time at various precisions |
+| `size` | number | File size in bytes |
+| `mode` | number | File mode (permissions) as an integer |
+| `uid` | number | User ID of the file owner |
+| `gid` | number | Group ID of the file owner |
+| `ino` | number | Inode number |
+| `dev` | number | Device ID |
+| `nlink` | number | Number of hard links |
+| `new` | boolean | `true` if the file is new since the `since` clockspec |
+| `type` | string | File type: `f` (file), `d` (directory), `l` (symlink), etc. |
+| `symlink_target` | string | Target of a symlink (if applicable) |
+| `content.sha1hex` | string | SHA-1 hex digest of the file content |
+
+## Query options
+
+### `relative_root`
+
+Evaluate the query relative to a subdirectory of the watch root. Results are returned with the relative root prefix stripped, and files outside the relative root are excluded.
+
+```json
+["query", "/path/to/watched/root", {
+  "relative_root": "project1",
+  "suffix": "ts",
+  "fields": ["name"]
+}]
+```
+
+This is useful for large repositories where your tool only cares about a specific subdirectory. It avoids the overhead of a separate `watch-project` on that subdirectory.
+
+### `case_sensitive`
+
+Override the default case-sensitivity behavior for the expression evaluator. When omitted, Watchman uses the case sensitivity of the underlying filesystem.
+
+```json
+["query", "/path/to/root", {
+  "suffix": "js",
+  "case_sensitive": true
+}]
+```
+
+### `sync_timeout`
+
+Watchman normally synchronizes with the kernel notification stream before running a query. `sync_timeout` sets the maximum number of milliseconds to wait for that synchronization. Set to `0` to skip synchronization entirely.
+
+```json
+["query", "/path/to/root", {
+  "suffix": "js",
+  "sync_timeout": 100
+}]
+```
+
+### `lock_timeout`
+
+The maximum number of milliseconds to wait to acquire the view lock before failing the query.
+
+```json
+["query", "/path/to/root", {
+  "suffix": "js",
+  "lock_timeout": 5000
+}]
+```
+
+## Simple pattern syntax for the CLI
+
+The `find`, `since`, and `trigger` CLI commands accept a simplified pattern syntax instead of a JSON expression. This syntax builds a query expression from positional arguments:
+
+- Patterns accumulate into an _inclusion_ list by default.
+- `-X` switches subsequent patterns to the _exclusion_ list.
+- `-I` switches back to the _inclusion_ list.
+- `--` ends the pattern list.
+- `-p` makes the next pattern use PCRE matching.
+- `-P` makes the next pattern use case-insensitive PCRE matching.
+- `!` followed by a space and a pattern negates the match.
+
+A single pattern:
+
+```bash
+watchman find /path/to/root '*.c'
+```
+
+This generates the expression:
+
+```json
+["match", "*.c", "wholename"]
+```
+
+Multiple patterns are joined with `anyof`:
+
+```bash
+watchman find /path/to/root '*.js' '*.css'
+```
+
+```json
+["anyof",
+  ["match", "*.js", "wholename"],
+  ["match", "*.css", "wholename"]
+]
+```
+
+Exclusions use `allof` and `not`:
+
+```bash
+watchman find /path/to/root -X '*.c' -I '*main*'
+```
+
+```json
+["allof",
+  ["not", ["match", "*.c", "wholename"]],
+  ["match", "*main*", "wholename"]
+]
+```

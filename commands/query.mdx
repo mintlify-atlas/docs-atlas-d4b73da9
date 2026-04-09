@@ -1,0 +1,295 @@
+---
+title: "query — execute a file query against a watched root"
+description: "Run a structured JSON query against a Watchman-watched directory, filtering files by expression, generator, and the exact fields you need."
+---
+
+The `query` command executes a file query against a watched root. You pass a JSON object describing the query — including an optional expression to filter results, a generator to control which files are considered, and a list of fields to include in each result. Watchman evaluates the expression against the generated file set and returns matching entries.
+
+## Syntax
+
+```bash
+watchman -j <<< '["query", "/path/to/root", { ... }]'
+```
+
+The `-j` flag tells the watchman CLI to read JSON from stdin. Over the socket interface, send the command as a single-line JSON array.
+
+## Query object
+
+The second element of the command array is the path to the watched root. The third element is a query object:
+
+```json
+["query", "/path/to/root", {
+  "expression": ["allof",
+    ["type", "f"],
+    ["not", "empty"],
+    ["ipcre", "test", "basename"]
+  ],
+  "fields": ["name", "exists", "size"],
+  "suffix": "php"
+}]
+```
+
+### Generator fields
+
+Exactly one (or more) of the following generator fields controls which files are fed into the expression evaluator. If none are specified, the `all` generator is used.
+
+<ParamField body="since" type="string">
+  Produces files modified since the given [clockspec](/commands/since). Accepts a Unix timestamp, a clock ID (`c:123:234`), or a named cursor (`n:mycursor`). When the clockspec refers to a different Watchman instance or an unseen named cursor, the query is a _fresh instance_ and returns only currently-existing files with `new` set to `true`.
+</ParamField>
+
+<ParamField body="suffix" type="string | string[]">
+  Produces files with the given file extension or list of extensions. For example, `"suffix": "js"` or `"suffix": ["js", "css"]`. An empty array produces no results.
+</ParamField>
+
+<ParamField body="glob" type="string[]">
+  _Since 4.7._ Produces files matching the given glob patterns, evaluated against the in-memory file tree. Supports `**` for recursive matching (e.g. `["src/*.c", "**/*.h"]`). An empty array produces no results. Implicitly enables `dedup_results`.
+</ParamField>
+
+<ParamField body="path" type="string[] | object[]">
+  Produces files under the specified paths. Each entry is either a string (infinite depth) or an object with `path` (string) and `depth` (integer, `-1` for unlimited, `0` for immediate children only). Paths are relative to the watched root.
+</ParamField>
+
+### Query control fields
+
+<ParamField body="expression" type="array | string">
+  A filter expression applied to every file produced by the generator. Files that evaluate to `true` are included in the result. If omitted, all generated files match. Expressions are JSON arrays whose first element is the term name, for example `["type", "f"]` or `["allof", ["type", "f"], ["not", "empty"]]`.
+</ParamField>
+
+<ParamField body="fields" type="string[]" default='["name", "exists", "new", "size", "mode"]'>
+  The list of fields to include in each file result object. When only a single field is requested, the `files` array contains scalar values instead of objects. See [available fields](#available-fields) below.
+</ParamField>
+
+<ParamField body="relative_root" type="string">
+  _Since 3.3._ Evaluates the query relative to this subdirectory within the watched root. Path generators and expression matching are both scoped to this prefix, and it is stripped from returned paths.
+</ParamField>
+
+<ParamField body="dedup_results" type="boolean" default="false">
+  _Since 4.7._ Deduplicate files that appear multiple times when using multiple generators or overlapping path entries.
+</ParamField>
+
+<ParamField body="empty_on_fresh_instance" type="boolean" default="false">
+  When `true` and the query is a fresh instance (e.g. first use of a named cursor), return an empty `files` array instead of the full set of existing files. The response still sets `is_fresh_instance` to `true`.
+</ParamField>
+
+<ParamField body="sync_timeout" type="integer" default="60000">
+  _Since 2.1._ Milliseconds to wait for Watchman's view of the filesystem to become current before executing the query. Watchman checks currency by writing a cookie file and waiting for the corresponding notification. Set to `0` to skip synchronization and query the current in-memory state immediately.
+</ParamField>
+
+<ParamField body="lock_timeout" type="integer" default="60000">
+  _Since 4.6._ Milliseconds to wait to acquire the filesystem view lock before timing out. In normal operation this limit is never reached; lower it when you need queries to fail fast under load.
+</ParamField>
+
+<ParamField body="case_sensitive" type="boolean">
+  _Since 4.7._ Override the default case sensitivity of name-matching operations. Defaults to the case sensitivity of the watched filesystem (typically case-insensitive on macOS and Windows). Setting this to `true` on a case-insensitive filesystem can improve matching performance.
+</ParamField>
+
+<ParamField body="always_include_directories" type="boolean" default="false">
+  On EdenFS repositories, include directory change events across commit transitions. Only supported for Mercurial. This can be expensive; only enable it if your client needs directory events during commit switches.
+</ParamField>
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version string.
+</ResponseField>
+
+<ResponseField name="clock" type="string" required>
+  The clock value at the time the query was evaluated. Use this as the `since` clockspec in subsequent queries to get an incremental view of changes.
+</ResponseField>
+
+<ResponseField name="is_fresh_instance" type="boolean" required>
+  `true` when using the `since` generator and the clockspec refers to a different Watchman instance, or when a named cursor is seen for the first time. For all other generators this is always `true`.
+</ResponseField>
+
+<ResponseField name="files" type="object[] | scalar[]" required>
+  The matched file entries. Each entry is an object containing the requested `fields`, or a scalar value when only one field was requested.
+</ResponseField>
+
+### Available fields
+
+These are the valid values for the `fields` query parameter:
+
+<ResponseField name="name" type="string">
+  The file path relative to the watched root.
+</ResponseField>
+
+<ResponseField name="exists" type="boolean">
+  `true` if the file currently exists; `false` if it has been deleted.
+</ResponseField>
+
+<ResponseField name="new" type="boolean">
+  `true` when the file is newer than the `since` generator's clockspec — i.e. when the file's `cclock` is newer than the specified clock. Only meaningful for `since`-based queries.
+</ResponseField>
+
+<ResponseField name="size" type="integer">
+  File size in bytes.
+</ResponseField>
+
+<ResponseField name="mode" type="integer">
+  File mode as a decimal integer (corresponds to `st_mode` from `stat(2)`).
+</ResponseField>
+
+<ResponseField name="uid" type="integer">
+  Owning user ID.
+</ResponseField>
+
+<ResponseField name="gid" type="integer">
+  Owning group ID.
+</ResponseField>
+
+<ResponseField name="ino" type="integer">
+  Inode number.
+</ResponseField>
+
+<ResponseField name="dev" type="integer">
+  Device number.
+</ResponseField>
+
+<ResponseField name="nlink" type="integer">
+  Number of hard links.
+</ResponseField>
+
+<ResponseField name="mtime" type="integer">
+  Last modification time in whole seconds since the Unix epoch. Also available as `mtime_ms` (milliseconds), `mtime_us` (microseconds), `mtime_ns` (nanoseconds), or `mtime_f` (floating-point seconds).
+</ResponseField>
+
+<ResponseField name="ctime" type="integer">
+  Last inode change time in whole seconds. Also available as `ctime_ms`, `ctime_us`, `ctime_ns`, and `ctime_f`.
+</ResponseField>
+
+<ResponseField name="cclock" type="string">
+  The "created clock" — the clock value when Watchman first observed this file, or when it last transitioned from deleted to existing.
+</ResponseField>
+
+<ResponseField name="oclock" type="string">
+  The "observed clock" — the clock value when Watchman last observed a change to this file or its metadata.
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  _Since 3.1._ Single-character file type as returned by the [`type` expression](/expressions/type-size): `f` (regular file), `d` (directory), `l` (symlink), `b` (block device), `c` (character device), `p` (named pipe), `s` (socket).
+</ResponseField>
+
+<ResponseField name="symlink_target" type="string | null">
+  _Since 4.6._ The target path of a symbolic link, or `null` if the file is not a symlink.
+</ResponseField>
+
+<ResponseField name="content.sha1hex" type="string | null | object">
+  _Since 4.9._ The SHA-1 digest of the file's content as 40 hex digits (e.g. `"da39a3ee5e6b4b0d3255bfef95601890afd80709"` for an empty file). Returns `null` for non-regular files. Returns an object with an `error` key if the digest could not be computed.
+</ResponseField>
+
+## Examples
+
+### Query all PHP files by suffix
+
+```bash
+watchman -j <<< '["query", "/path/to/root", {
+  "suffix": "php",
+  "fields": ["name"]
+}]'
+```
+
+```json
+{
+  "version": "1.5",
+  "clock": "c:80616:59",
+  "is_fresh_instance": true,
+  "files": ["index.php", "lib/router.php"]
+}
+```
+
+### Query files changed since a clock
+
+```bash
+watchman -j <<< '["query", "/path/to/root", {
+  "since": "c:80616:59",
+  "expression": ["type", "f"],
+  "fields": ["name", "exists", "new", "size", "mode"]
+}]'
+```
+
+```json
+{
+  "version": "2.9",
+  "clock": "c:80616:72",
+  "is_fresh_instance": false,
+  "files": [
+    {
+      "name": "argv.c",
+      "exists": true,
+      "new": false,
+      "size": 1340,
+      "mode": 33188
+    }
+  ]
+}
+```
+
+### Query with glob generator
+
+```bash
+watchman -j <<< '["query", "/path/to/root", {
+  "glob": ["src/*.c", "src/*.h"],
+  "fields": ["name", "size"]
+}]'
+```
+
+### Query with path generator and depth limit
+
+```bash
+watchman -j <<< '["query", "/path/to/root", {
+  "path": [{"path": "src", "depth": 1}],
+  "expression": ["type", "f"],
+  "fields": ["name"]
+}]'
+```
+
+### Query with custom timeouts and case sensitivity
+
+```bash
+watchman -j <<< '["query", "/path/to/root", {
+  "suffix": "php",
+  "expression": ["match", "foo*.php", "basename"],
+  "case_sensitive": true,
+  "sync_timeout": 10000,
+  "lock_timeout": 5000,
+  "fields": ["name"]
+}]'
+```
+
+### Request SHA-1 content hashes
+
+```bash
+watchman -j <<< '["query", "/path/to/root", {
+  "since": "n:mycursor",
+  "expression": ["type", "f"],
+  "fields": ["name", "content.sha1hex", "symlink_target", "type"]
+}]'
+```
+
+```json
+{
+  "version": "2019-07-22T13:50:36Z",
+  "clock": "c:1563834049:1830370:791543813:2257494",
+  "is_fresh_instance": false,
+  "files": [
+    {
+      "name": "docs",
+      "type": "d",
+      "symlink_target": null,
+      "content.sha1hex": null
+    },
+    {
+      "name": "eloop",
+      "type": "l",
+      "symlink_target": "eloop",
+      "content.sha1hex": {
+        "error": "eloop: file is a symlink: Invalid argument"
+      }
+    }
+  ]
+}
+```
+
+<Note>
+  When a field value cannot be computed, it is returned as `null` or as an object with an `error` key containing a descriptive message. Always check for both forms when reading optional fields like `content.sha1hex`.
+</Note>

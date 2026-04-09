@@ -1,0 +1,58 @@
+---
+title: "list-capabilities — enumerate all server capabilities"
+description: "Retrieve the full list of capability names supported by the running Watchman server, covering commands, expression terms, result fields, and features."
+---
+
+The `list-capabilities` command returns every capability name supported by the running Watchman server. Capabilities identify individual commands, expression terms, query result fields, and optional feature enhancements. This command is available since Watchman **3.8**.
+
+## Syntax
+
+```bash
+watchman list-capabilities
+```
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="capabilities" type="string[]" required>
+  An unordered list of all capability names supported by this server. The list is typically much longer than the example below.
+</ResponseField>
+
+## Example
+
+```bash
+watchman list-capabilities
+```
+
+```json
+{
+  "version": "3.8.0",
+  "capabilities": [
+    "field-mode",
+    "term-allof",
+    "cmd-trigger"
+  ]
+}
+```
+
+The actual capabilities list returned by a production server includes dozens of entries covering every command (`cmd-*`), expression term (`term-*`), query result field (`field-*`), and feature enhancement (`relative_root`, `wildmatch`, `suffix-set`, etc.).
+
+## Capability naming conventions
+
+| Prefix | Identifies |
+|--------|-----------|
+| `cmd-` | A Watchman command (e.g. `cmd-watch-project`, `cmd-subscribe`) |
+| `term-` | A query expression term (e.g. `term-match`, `term-allof`) |
+| `field-` | A query result field (e.g. `field-name`, `field-size`) |
+| *(none)* | A named feature enhancement (e.g. `relative_root`, `wildmatch`) |
+
+## When to use list-capabilities vs version
+
+<Note>
+  For client compatibility checks, prefer the [`version`](/commands/version) command with `optional` and `required` capability arrays. The `version` command lets you check specific capabilities in a single round-trip and returns an error if required capabilities are absent. Use `list-capabilities` for discovery and debugging rather than for programmatic capability gating.
+</Note>
+
+For more on the capabilities system and how to write forward-compatible client code, see the [capabilities guide](/capabilities).

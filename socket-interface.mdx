@@ -1,0 +1,103 @@
+---
+title: "Watchman Unix socket interface and encoding protocol"
+description: "Connect to Watchman over a Unix socket using JSON or BSER. Learn how to locate the socket, handle error and warning fields, and avoid subprocess overhead."
+---
+
+Most Watchman integrations invoke the `watchman` binary and parse its output. For applications where spawning a subprocess on every call is too expensive, you can connect directly to the Watchman service over its Unix domain socket. This is how all official client libraries — including the Node.js, Python, and C++ clients — work internally.
+
+## Finding the socket
+
+The socket path depends on compile-time options and any command-line flags passed when the server was started. Do not hardcode the path. Instead, discover it at runtime using `get-sockname`:
+
+```bash
+$ watchman get-sockname
+```
+
+```json
+{
+  "version": "2023-01-01",
+  "sockname": "/var/run/watchman/alice-state/sock"
+}
+```
+
+If you are writing a trigger handler, the socket path is also available in the `$WATCHMAN_SOCK` environment variable (since version 2.9.7). Using this variable avoids an extra subprocess call.
+
+```bash
+$ echo $WATCHMAN_SOCK
+/var/run/watchman/alice-state/sock
+```
+
+## Protocol overview
+
+The Watchman socket implements a **request-response protocol**. Each message is a PDU (protocol data unit) encoded in either JSON or BSER. Most commands follow a strict one-request, one-response pattern.
+
+Two commands — `subscribe` and `log-level` — allow Watchman to push additional unsolicited PDUs to the client after the initial response. These require stateful connection handling on the client side.
+
+## JSON encoding
+
+The JSON encoding represents each PDU as a single line of compact JSON followed by a newline (`\n`) character. The newline signals the end of the PDU.
+
+- **Requests** from the client are always a **JSON array**.
+- **Responses** from the server are always a **JSON object**.
+
+Do not send pretty-printed JSON — the entire request must be on a single line.
+
+```text
+["since", "/path/to/src", "n:c_srcs", "*.c"]\n
+```
+
+A typical exchange over the raw socket looks like:
+
+```text
+→ ["watch", "/home/alice/myproject"]\n
+← {"version":"2023-01-01","watch":"/home/alice/myproject","watcher":"inotify"}\n
+```
+
+```text
+→ ["query", "/home/alice/myproject", {"fields": ["name"], "expression": ["suffix", "js"]}]\n
+← {"version":"2023-01-01","clock":"c:1234:56","files":["src/index.js"],"is_fresh_instance":false}\n
+```
+
+## BSER encoding
+
+BSER (Binary Serialized Result) is a local-only binary format that represents the same data types as JSON but in a more compact form. It also supports binary strings, which allows filenames with arbitrary byte sequences to be transmitted faithfully.
+
+To switch to BSER encoding, send the magic preamble bytes `\x00\x78\x01` before your first request. When you make a request in BSER, the server responds in BSER.
+
+BSER is preferable to JSON when:
+
+- You are processing large result sets with many files
+- You need to handle filenames with non-UTF-8 byte sequences
+- You want to minimize parsing overhead in a tight loop
+
+For full details on the BSER wire format — including type tags, integer encoding, and the compact template array format — see the [BSER specification](/socket-interface#bser-encoding).
+
+<Note>
+  BSER is a local-only format and is not intended for use across machines or across different Watchman versions.
+</Note>
+
+## Error and warning fields
+
+Every JSON response object may include the following fields:
+
+**`error`** — present when the request was not successful. The value is a human-readable string describing the failure.
+
+```json
+{
+  "version": "2023-01-01",
+  "error": "unable to resolve root /nonexistent: No such file or directory"
+}
+```
+
+**`warning`** — present when Watchman wants to report a condition that should be addressed for correct operation. The most common cause is overflowing system limits on file watching resources (inotify watches on Linux, FSEvents buffers on macOS). Tools should surface this message to the user.
+
+```json
+{
+  "version": "2023-01-01",
+  "clock": "c:1234:56",
+  "files": [],
+  "warning": "Recrawled this watch 2 times, most recently because:\n/home/alice/myproject: kFSEventStreamEventFlagUserDropped\nTo resolve, please review https://facebook.github.io/watchman/docs/troubleshooting.html"
+}
+```
+
+Always check for `error` before processing any other fields. A response can contain `warning` alongside valid data — display it as an advisory but continue processing normally.

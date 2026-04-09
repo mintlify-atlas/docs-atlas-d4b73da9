@@ -1,0 +1,155 @@
+---
+title: "Clock IDs and incremental time tracking in Watchman"
+description: "Understand Watchman's three clockspec formats — unix timestamps, clock IDs, and named cursors — and why clock IDs give you race-free change tracking."
+---
+
+Watchman uses _clockspecs_ to represent points in time for queries that need to identify what changed since a given moment. The clockspec you pass as a `since` value determines both the correctness guarantees you get and the performance of your query. Choosing the right format matters: the wrong choice can introduce race conditions or add query latency.
+
+## The three clockspec formats
+
+### Unix timestamp
+
+A unix timestamp is the number of seconds since the epoch, passed as an integer:
+
+```json
+["query", "/path/to/root", {
+  "since": 1700000000,
+  "fields": ["name"]
+}]
+```
+
+This is the most obvious format but also the least reliable. Watchman records the time it _observed_ a change, not the modification time stored in the inode. If the clock on the system ticks between when a file changes and when Watchman observes it, you may miss changes or receive duplicates. For anything beyond a quick one-off check, prefer a clock ID.
+
+### Clock ID (`c:pid:tick`)
+
+A clock ID is an opaque string of the form `c:123:456` that Watchman returns in query and subscription responses. It represents a position in Watchman's internal event stream, not a wall-clock time.
+
+```json
+["query", "/path/to/root", {
+  "since": "c:1234:56",
+  "fields": ["name"]
+}]
+```
+
+Watchman includes the current clock ID in every query response:
+
+```json
+{
+  "clock": "c:1234:57",
+  "files": ["src/index.js"]
+}
+```
+
+Store the returned `clock` value and use it as `since` in your next query. This gives you a race-free view of exactly which files changed between two query operations, regardless of wall-clock skew.
+
+If a clock ID was produced by a different Watchman process (for example, after a Watchman restart), the query enters _fresh instance_ mode. You will receive all currently-existing files with `new: true`, equivalent to a first-time query.
+
+### Named cursor (`n:name`)
+
+A named cursor is a convenience mechanism that lets Watchman track the last-used clock on your behalf. The cursor name is a string you choose, prefixed with `n:`.
+
+```bash
+watchman since /path/to/src n:c_srcs '*.c'
+```
+
+The first time you run this, Watchman returns all C source files. On subsequent runs, it returns only those that changed since the last time this cursor was used.
+
+Named cursors are useful for simple CLI workflows, but they have important limitations:
+
+- You cannot roll back a named cursor to a previous position.
+- Since Watchman 4.7, named cursors require an exclusive lock on the view, which increases query latency under concurrent access.
+
+<Warning>Named cursors are not recommended for use in applications or tools that issue concurrent queries. Use clock IDs instead.</Warning>
+
+## Choosing the right format
+
+| Format | Race-free | Survives restart | Concurrent-safe | Recommended for |
+|--------|-----------|-----------------|-----------------|-----------------|
+| Unix timestamp | No | Yes | Yes | Quick one-off checks only |
+| Clock ID | Yes | No (triggers fresh instance) | Yes | Applications, tools, subscriptions |
+| Named cursor | Yes | No (triggers fresh instance) | No | Simple CLI scripts |
+
+For any production tool or application, use clock IDs. Store the `clock` field from each response and feed it back as `since` on the next request.
+
+## Fresh instance behavior
+
+A query enters _fresh instance_ mode when the `since` clockspec cannot be honored. This happens when:
+
+- The `since` value is blank or `null`.
+- The clock ID was produced by a different Watchman process (Watchman was restarted).
+- A named cursor has never been used before.
+
+In fresh instance mode, Watchman returns all currently-existing files and marks every file node with `new: true`. The response also includes `"is_fresh_instance": true`.
+
+If your application cannot handle a large fresh instance result, set `empty_on_fresh_instance: true` in your query. Watchman will return an empty `files` array with `is_fresh_instance: true`, and your application can decide how to re-initialize:
+
+```json
+["query", "/path/to/root", {
+  "since": "c:old:clock",
+  "empty_on_fresh_instance": true,
+  "fields": ["name"]
+}]
+```
+
+Response on fresh instance:
+
+```json
+{
+  "clock": "c:1234:1",
+  "is_fresh_instance": true,
+  "files": []
+}
+```
+
+## Practical usage
+
+### Initial query — get current clock
+
+Before subscribing or setting up incremental queries, fetch the current clock:
+
+```bash
+watchman clock /path/to/root
+```
+
+```json
+{
+  "version": "2021.08.30.00",
+  "clock": "c:1699:1"
+}
+```
+
+Use this clock as `since` in your first subscription or query to avoid replaying the full file tree.
+
+### Incremental query with clock ID
+
+```json
+["query", "/path/to/root", {
+  "since": "c:1699:1",
+  "expression": ["type", "f"],
+  "fields": ["name", "exists"]
+}]
+```
+
+Response:
+
+```json
+{
+  "clock": "c:1699:7",
+  "files": [
+    {"name": "src/app.js", "exists": true},
+    {"name": "src/old.js", "exists": false}
+  ]
+}
+```
+
+Store `"c:1699:7"` and use it as `since` next time to get only files changed after this point.
+
+### Named cursor from the CLI
+
+```bash
+# First run: returns all .c files
+watchman since /path/to/src n:my_c_cursor '*.c'
+
+# Second run: returns only .c files changed since the first run
+watchman since /path/to/src n:my_c_cursor '*.c'
+```

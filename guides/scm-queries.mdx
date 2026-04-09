@@ -1,0 +1,185 @@
+---
+title: "Source control aware file change queries in Watchman"
+description: "Use Watchman's merge-base tracking and fat clocks to get a minimized set of changed files during large rebases, with Git and Mercurial support."
+---
+
+When a developer rebases their branch over many commits from a remote, the working copy touches hundreds or thousands of files — even if the developer's own changes are small. Watchman's source control aware query mode solves this by returning only the files that differ between your local changes and the computed merge base, rather than every file that changed on disk.
+
+<Note>The capability name for source control aware queries is `scm-since`. You can check for it using the `version` command. Git support is available since the 2021-08-30 release; Mercurial support (`scm-hg`) has been available since Watchman 4.9.</Note>
+
+## The problem: noisy rebases
+
+To understand why this matters, consider a developer with a two-commit stack based off `main`:
+
+```
+| @  6b38a5  dev
+| |  Add cats.cpp
+| |
+| o  fa2e92  dev
+|/   Add cat.jpg
+|
+o f12345 main
+```
+
+When the developer runs `hg pull` or `git fetch`, new commits arrive but the working copy does not change. When the developer then rebases (`hg rebase -d main` or `git rebase main`), the working copy is updated to incorporate all the changes from the remote's history, potentially touching hundreds of files.
+
+Without source control awareness, Watchman reports all of those files to subscribed tools. With source control awareness, Watchman reports only `cat.jpg` and `cats.cpp` — the files in the developer's own commits.
+
+## Fat clocks and the `mergebase-with` parameter
+
+To activate source control aware mode, pass a _fat clock_ as the `since` parameter. A fat clock is an object rather than a string, and it includes an `scm` block:
+
+```json
+["query", "/path/to/root", {
+  "since": {
+    "scm": {
+      "mergebase-with": "main"
+    }
+  },
+  "expression": ["type", "f"],
+  "fields": ["name"]
+}]
+```
+
+`mergebase-with` is a symbolic branch name. Watchman computes the merge base between your current checkout and that branch. The initial result, using the first scenario above, looks like:
+
+```json
+{
+  "clock": {
+    "clock": "c:123:123",
+    "scm": {
+      "mergebase": "f12345",
+      "mergebase-with": "main"
+    }
+  },
+  "files": ["cat.jpg", "cats.cpp"]
+}
+```
+
+The response clock is a fat clock that includes both the Watchman clock and the resolved `mergebase` hash. Store this entire object — you will feed it back in on the next query.
+
+## Incremental queries with fat clocks
+
+After you receive a fat clock response, use it as the `since` value in subsequent queries to get incremental updates:
+
+```json
+["query", "/path/to/root", {
+  "since": {
+    "clock": "c:123:123",
+    "scm": {
+      "mergebase": "f12345",
+      "mergebase-with": "main"
+    }
+  },
+  "expression": ["type", "f"],
+  "fields": ["name"]
+}]
+```
+
+If no files changed and the merge base is stable (for example, after `hg pull` but before rebase), the response reflects this:
+
+```json
+{
+  "clock": {
+    "clock": "c:123:124",
+    "scm": {
+      "mergebase": "f12345",
+      "mergebase-with": "main"
+    }
+  },
+  "files": []
+}
+```
+
+After the developer rebases onto the latest `main` (advancing the merge base from `f12345` to `fabf87`), the next query using the clock above returns:
+
+```json
+{
+  "clock": {
+    "clock": "c:123:125",
+    "scm": {
+      "mergebase": "fabf87",
+      "mergebase-with": "main"
+    }
+  },
+  "files": ["cat.jpg", "cats.cpp"]
+}
+```
+
+The `mergebase` field changed from `f12345` to `fabf87`. This tells your tool that the base revision advanced: you can now load pre-built artifacts for `fabf87` from artifact storage and apply only the delta for `cat.jpg` and `cats.cpp` on top.
+
+<Warning>If your tool does not know how to use a changed merge base to load pre-built state, you should not use source control aware query mode. The file list is intentionally minimized and omits files changed by remote commits that were pulled in by the rebase.</Warning>
+
+## Detecting a merge base change
+
+Compare the `mergebase` field in the response clock with the `mergebase` from your previous clock:
+
+- If they are the same, only your local edits changed. Apply the `files` delta directly.
+- If they differ, the merge base advanced. Retrieve pre-built state for the new merge base, then apply the `files` delta on top.
+
+## Source control aware subscriptions
+
+Use the same fat clock pattern in subscriptions to receive minimized file change notifications continuously:
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "fields": ["name"],
+  "since": {
+    "scm": {
+      "mergebase-with": "main"
+    }
+  }
+}]
+```
+
+Subscription notifications include fat clocks in both the `clock` and `since` fields:
+
+```json
+{
+  "subscription": "mysubscription",
+  "clock": {
+    "clock": "c:1234:125",
+    "scm": {
+      "mergebase": "fabf87",
+      "mergebase-with": "main"
+    }
+  },
+  "since": {
+    "clock": "c:1234:123",
+    "scm": {
+      "mergebase": "f12345",
+      "mergebase-with": "main"
+    }
+  },
+  "files": ["cat.jpg", "cats.cpp"],
+  "root": "/path/to/root"
+}
+```
+
+The `since` field is provided as a convenience: compare its `mergebase` to `clock.scm.mergebase` to determine whether the merge base changed in this notification.
+
+Source control aware subscriptions automatically enable `defer_vcs` and defer the `hg.update` state. This prevents spurious notifications from being delivered while the working copy update is in progress.
+
+<Note>Watchman requires cooperation from the source control system to know when to defer events during an update. For this to work, the VCS must signal its state transitions to Watchman (for example, by calling `state-enter` and `state-leave`).</Note>
+
+## `state-enter` and `state-leave`
+
+Source control operations can signal their start and end to Watchman so that subscribers can react appropriately. The `state-enter` command marks the beginning of an operation and `state-leave` marks its end.
+
+```json
+["state-enter", "/path/to/root", {
+  "name": "hg.update",
+  "metadata": {"rev": "fabf87"}
+}]
+```
+
+```json
+["state-leave", "/path/to/root", {
+  "name": "hg.update",
+  "metadata": {"rev": "fabf87"}
+}]
+```
+
+Subscribers that include `"defer": ["hg.update"]` in their subscription definition will have their notification stream paused between these two commands. See [subscriptions](/guides/subscriptions) for details on `defer` and `drop`.
+
+In source control aware subscription responses, `state-enter` and `state-leave` notifications carry only a regular (non-fat) clock. Computing the source control information on every state transition would add latency, so it is omitted from state notifications.

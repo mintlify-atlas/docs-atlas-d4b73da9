@@ -1,0 +1,304 @@
+---
+title: "Configuring Watchman with watchmanconfig and global JSON"
+description: "Configure Watchman using .watchmanconfig for per-root settings and /etc/watchman.json globally. Covers ignore rules, GC tuning, and performance options."
+---
+
+Watchman reads configuration from two files: a global `/etc/watchman.json` that applies to all users, and a per-root `.watchmanconfig` placed at the top of a watched directory tree. Configuration changes are not picked up automatically — you must remove and re-add the watch (for `.watchmanconfig`) or restart Watchman (for `/etc/watchman.json`) for changes to take effect.
+
+## Configuration files
+
+**Global config: `/etc/watchman.json`**
+
+The path can be changed at build time with `--enable-conffile`, and overridden at runtime with the `$WATCHMAN_CONFIG_FILE` environment variable. If the global config file does not exist, Watchman falls back to the same path with `.default` appended (e.g. `/etc/watchman.json.default`). This allows system packages to ship different defaults.
+
+**Per-root config: `.watchmanconfig`**
+
+When Watchman starts watching a root, it looks for a valid JSON file named `.watchmanconfig` at the root of that directory. If found, options in this file apply only to that root.
+
+## Configuration scopes
+
+Each option has one of three scopes that controls where its value is read from:
+
+| Scope | Description |
+|-------|-------------|
+| **local** | Read from `.watchmanconfig` only |
+| **global** | Read from `/etc/watchman.json` only |
+| **fallback** | Read from `.watchmanconfig`; falls back to `/etc/watchman.json` if not present |
+
+## Scope and version reference
+
+| Option | Scope | Since version |
+|--------|-------|---------------|
+| `settle` | local | — |
+| `root_restrict_files` | global | deprecated in 3.1 |
+| `root_files` | global | 3.1 |
+| `enforce_root_files` | global | 3.1 |
+| `illegal_fstypes` | global | 2.9.8 |
+| `illegal_fstypes_advice` | global | 2.9.8 |
+| `ignore_vcs` | local | 2.9.3 |
+| `ignore_dirs` | local | 2.9.3 |
+| `gc_age_seconds` | local | 2.9.4 |
+| `gc_interval_seconds` | local | 2.9.4 |
+| `fsevents_latency` | fallback | 3.2 |
+| `fsevents_try_resync` | fallback | 4.6 |
+| `prefer_split_fsevents_watcher` | fallback | — |
+| `idle_reap_age_seconds` | local | 3.7 |
+| `hint_num_files_per_dir` | fallback | 3.9 |
+| `hint_num_dirs` | fallback | 4.6 |
+| `suppress_recrawl_warnings` | fallback | 4.7 |
+| `eden_file_count_threshold_for_fresh_instance` | local | — |
+
+## Configuration options
+
+### settle
+
+Controls how long the filesystem must be idle before Watchman dispatches triggers. Measured in milliseconds. The default is `20`.
+
+```json
+{
+  "settle": 20
+}
+```
+
+### root_files
+
+_Since 3.1._
+
+Specifies a list of files that, if present in a directory, identify it as a project root. This is used by the `watch-project` command to find the nearest root.
+
+If unset, Watchman uses the deprecated `root_restrict_files` value if present. If neither is set, the default is `[".git", ".hg", ".svn", ".watchmanconfig"]`. Watchman always adds `.watchmanconfig` to this list even if you specify your own values.
+
+```json
+{
+  "root_files": [".git", ".hg", ".watchmanconfig"]
+}
+```
+
+### enforce_root_files
+
+_Since 3.1._
+
+A boolean, default `false`. When set to `true`, the `watch` command will only succeed if the requested directory contains a file listed in `root_files`, and `watch-project` will only succeed if a valid project root is found.
+
+If unset, Watchman checks for `root_restrict_files` — if that is present, `enforce_root_files` is treated as `true`.
+
+```json
+{
+  "enforce_root_files": true
+}
+```
+
+### root_restrict_files
+
+<Warning>
+  Deprecated since version 3.1. Use `root_files` and `enforce_root_files` instead.
+</Warning>
+
+Specifies a list of files, at least one of which must be present for Watchman to add a directory as a root. By default there are no restrictions.
+
+```json
+{
+  "root_restrict_files": [".git", ".hg"]
+}
+```
+
+### illegal_fstypes
+
+_Since 2.9.8._
+
+A list of filesystem type names that Watchman is not allowed to watch. Watchman checks the filesystem type at the root of a watch and refuses if it matches. Use `illegal_fstypes_advice` to provide a human-readable suggestion. If the type cannot be determined on Linux, it is reported as `unknown`.
+
+```json
+{
+  "illegal_fstypes": ["nfs", "cifs", "smb"],
+  "illegal_fstypes_advice": "use a local directory"
+}
+```
+
+### illegal_fstypes_advice
+
+_Since 2.9.8._
+
+A string shown to users when their watch is rejected due to `illegal_fstypes`. If omitted, a default message suggesting relocation to local disk is shown.
+
+```json
+{
+  "illegal_fstypes_advice": "mount your repo on a local SSD instead of a network share"
+}
+```
+
+### ignore_vcs
+
+Applies special shallow-watch logic to version control directories. These directories are watched shallowly — Watchman uses them for cookie files and VCS locking activity without crawling their full contents.
+
+The default value is `[".git", ".hg", ".svn", ".jj"]`.
+
+```json
+{
+  "ignore_vcs": [".git", ".hg"]
+}
+```
+
+### ignore_dirs
+
+Directories listed here are completely ignored by Watchman — they never appear in query results and Watchman receives no change events from them.
+
+On Linux, `ignore_dirs` is enforced at the kernel level via inotify. On macOS, the first 8 entries (since 4.6) are accelerated at the OS level; entries beyond the first 8 are filtered in user space. For busy build directories, consider placing the most active directories in the first 8 positions.
+
+<Note>
+  Since 2.9.9, if a directory appears in both `ignore_dirs` and `ignore_vcs`, `ignore_dirs` takes precedence.
+</Note>
+
+```json
+{
+  "ignore_dirs": ["build", "dist", "node_modules"]
+}
+```
+
+### gc_age_seconds
+
+_Since 2.9.4._
+
+Deleted files and directories older than this value are pruned from Watchman's internal view of the filesystem. Until pruned, deleted nodes remain visible in queries with `"exists": false`. After pruning, any `since` query based on a clock older than the last prune is treated as a fresh instance query.
+
+Default: `43200` (12 hours).
+
+```json
+{
+  "gc_age_seconds": 43200
+}
+```
+
+### gc_interval_seconds
+
+_Since 2.9.4._
+
+How often Watchman checks for and prunes deleted nodes per `gc_age_seconds`. Set to `0` to disable periodic pruning.
+
+Default: `86400` (24 hours).
+
+```json
+{
+  "gc_interval_seconds": 86400
+}
+```
+
+### fsevents_latency
+
+_Since 3.2. macOS only._
+
+Controls the latency passed to `FSEventStreamCreate`, in seconds. Lower values mean more frequent event delivery; higher values let the system batch more changes together, reducing CPU usage and the risk of dropped events.
+
+Before version 3.2 this was fixed at `0.0001`. The default since 3.2 is `0.01`.
+
+If you see `kFSEventStreamEventFlagUserDropped` errors, try increasing this value.
+
+```json
+{
+  "fsevents_latency": 0.01
+}
+```
+
+### fsevents_try_resync
+
+_Since 4.6. macOS only._
+
+When `true`, Watchman attempts to resync from the FSEvents journal if a `kFSEventStreamEventFlagUserDropped` event is received. This avoids a full recrawl by replaying the event stream from a known point in time.
+
+The journal may not be available if volumes are mounted read-only, if it has been purged, or if FSEvents IDs have rolled over. In those cases the full recrawl strategy is used as a fallback.
+
+Since 4.7, this strategy also applies to `kFSEventStreamEventFlagKernelDropped` events.
+
+<Warning>
+  As of December 2021, this defaults to `false` due to possible correctness issues. Only enable it if you understand the tradeoffs.
+</Warning>
+
+```json
+{
+  "fsevents_try_resync": false
+}
+```
+
+### prefer_split_fsevents_watcher
+
+_macOS only._
+
+Default `false`. When `true`, Watchman uses multiple FSEvents streams to watch a directory hierarchy instead of a single stream. This can significantly reduce `kFSEventStreamEventFlagUserDropped` events for workloads with heavy writes to a top-level directory listed in `ignore_dirs`.
+
+```json
+{
+  "prefer_split_fsevents_watcher": true
+}
+```
+
+### idle_reap_age_seconds
+
+_Since 3.7._
+
+How long a watch can remain idle (no commands operating on it) before it becomes a candidate for reaping. When an idle watch has no triggers and no subscriptions, it is cancelled and removed from the state file, freeing OS resources.
+
+Set to `0` to prevent reaping. Default: `432000` (5 days).
+
+```json
+{
+  "idle_reap_age_seconds": 432000
+}
+```
+
+### hint_num_files_per_dir
+
+_Since 3.9._
+
+Pre-sizes the hash table used to track files per directory. Setting this value close to the number of files in your largest directory reduces hash collisions during the initial crawl.
+
+Before 3.9 this was fixed at `2`. The default since 3.9 is `64`. Very large values increase memory overhead — each slot costs 8 bytes on 64-bit systems (doubled on case-insensitive filesystems), rounded up to the next power of two.
+
+```json
+{
+  "hint_num_files_per_dir": 128
+}
+```
+
+### hint_num_dirs
+
+_Since 4.6._
+
+Pre-sizes the hash table used to track all directories in the watched tree. The optimal value is a power of two larger than the number of directories in your tree. Run `find . -type d | wc -l` to get your count.
+
+Default: `131072`.
+
+```json
+{
+  "hint_num_dirs": 131072
+}
+```
+
+### suppress_recrawl_warnings
+
+_Since 4.7._
+
+When `true`, Watchman omits recrawl-related warning fields from response PDUs. Default is `false`.
+
+The intent of the default is that someone in your organization should be aware of recrawls and be able to address them. Sites that have their own monitoring pipeline may set this to `true` to prevent the warnings from surfacing to end users who cannot act on them.
+
+```json
+{
+  "suppress_recrawl_warnings": false
+}
+```
+
+### eden_file_count_threshold_for_fresh_instance
+
+_EdenFS watcher only._
+
+When set to a non-zero value, Watchman returns a fresh instance response to `since` queries and subscriptions if the number of changed files exceeds this threshold. This prevents Watchman and EdenFS from fetching excessive metadata during large working copy updates.
+
+This behavior is only active if the query specifies `empty_on_fresh_instance`, or when this config is set to `0`.
+
+Default: `10000`.
+
+```json
+{
+  "eden_file_count_threshold_for_fresh_instance": 10000
+}
+```

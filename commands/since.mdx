@@ -1,0 +1,194 @@
+---
+title: "since — find files changed since a given clockspec"
+description: "Return all files under a watched root that changed since a given timestamp, clock ID, or named cursor, with optional glob pattern filtering."
+---
+
+The `since` command returns all files under a watched root that have changed since the specified clockspec. You can optionally narrow results to files matching one or more patterns. Watchman compares each file's observed modification clock against your clockspec and returns the matching set, along with a current clock you can use for the next incremental query.
+
+## Syntax
+
+```bash
+watchman since <path> <clockspec> [patterns]
+```
+
+- `<path>` — absolute path to the watched root
+- `<clockspec>` — a timestamp, clock ID, or named cursor (see below)
+- `[patterns]` — optional shell-style glob patterns to filter by filename
+
+## The clockspec argument
+
+Watchman accepts three forms for the clockspec:
+
+| Form | Example | Notes |
+|------|---------|-------|
+| Unix timestamp | `1357617600` | Seconds since the epoch. Prone to race conditions at boundaries. |
+| Clock ID | `c:80616:59` | Opaque string returned by previous Watchman queries. Race-free and preferred. |
+| Named cursor | `n:mycursor` | Watchman tracks the last-seen clock for this name automatically. |
+
+Using a clock ID is the recommended approach. Watchman returns the current clock in every response; store it and pass it back on the next call to get a precise, race-free view of what changed.
+
+Named cursors are convenient for simple scripts: on the first call, Watchman returns all existing files; on subsequent calls it returns only what changed since the previous run. However, named cursors require an exclusive view lock and can increase query latency under load. Prefer clock IDs for performance-sensitive integrations.
+
+<Warning>
+  If the clockspec refers to a different Watchman process instance, or if a named cursor has not been used before, the query is treated as a **fresh instance**. All currently-existing files are returned with `new` set to `true`.
+</Warning>
+
+## Pattern filtering
+
+When one or more patterns are provided, only files whose names match are included in the results. Patterns use simple shell glob syntax (`*`, `?`, `[...]`) matched against the file's basename.
+
+```bash
+# All changed C source files since the last n:c_srcs query
+watchman since /path/to/src n:c_srcs '*.c'
+
+# All changed files since a specific clock
+watchman since /path/to/src c:80616:59
+
+# All changed JS or CSS files since a timestamp
+watchman since /path/to/src 1357617600 '*.js' '*.css'
+```
+
+## Response
+
+```json
+{
+  "version": "2.7",
+  "is_fresh_instance": true,
+  "clock": "c:80616:59",
+  "files": [
+    {
+      "name": "argv.c",
+      "exists": true,
+      "new": false,
+      "size": 1340,
+      "mode": 33188,
+      "mtime": 1357617635,
+      "ctime": 1357617635,
+      "uid": 100,
+      "gid": 100,
+      "ino": 20161390,
+      "dev": 16777220,
+      "nlink": 1,
+      "cclock": "c:80616:1",
+      "oclock": "c:80616:39"
+    }
+  ]
+}
+```
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version string.
+</ResponseField>
+
+<ResponseField name="clock" type="string" required>
+  The clock value at the moment the query was evaluated. Pass this as the clockspec in your next `since` call to receive only files changed after this point.
+</ResponseField>
+
+<ResponseField name="is_fresh_instance" type="boolean" required>
+  `true` when the clockspec was unrecognized (e.g. first use of a named cursor, or a clock from a previous Watchman process). In this case only currently-existing files are returned, and all entries have `new` set to `true`.
+</ResponseField>
+
+<ResponseField name="files" type="object[]" required>
+  Array of file result objects. Each object includes stat-level metadata fields.
+</ResponseField>
+
+### File object fields
+
+<ResponseField name="name" type="string">
+  File path relative to the watched root.
+</ResponseField>
+
+<ResponseField name="exists" type="boolean">
+  `true` if the file currently exists. When `false`, most other fields are omitted.
+</ResponseField>
+
+<ResponseField name="new" type="boolean">
+  `true` if the file's `cclock` is newer than the requested clockspec — meaning the file was created (or re-created) after that point.
+</ResponseField>
+
+<ResponseField name="cclock" type="string">
+  The "created clock" — when Watchman first observed this file, or when it last transitioned from deleted to existing.
+</ResponseField>
+
+<ResponseField name="oclock" type="string">
+  The "observed clock" — when Watchman last observed a change to this file or its metadata.
+</ResponseField>
+
+<ResponseField name="size" type="integer">
+  File size in bytes.
+</ResponseField>
+
+<ResponseField name="mode" type="integer">
+  File mode as a decimal integer.
+</ResponseField>
+
+<ResponseField name="mtime" type="integer">
+  Last modification time in seconds since the Unix epoch.
+</ResponseField>
+
+<ResponseField name="ctime" type="integer">
+  Last inode change time in seconds since the Unix epoch.
+</ResponseField>
+
+<ResponseField name="uid" type="integer">
+  Owning user ID.
+</ResponseField>
+
+<ResponseField name="gid" type="integer">
+  Owning group ID.
+</ResponseField>
+
+<ResponseField name="ino" type="integer">
+  Inode number.
+</ResponseField>
+
+<ResponseField name="dev" type="integer">
+  Device number.
+</ResponseField>
+
+<ResponseField name="nlink" type="integer">
+  Number of hard links.
+</ResponseField>
+
+## Examples
+
+### Incremental polling with a named cursor
+
+```bash
+# First run: returns all existing *.c files, advances the cursor
+watchman since /path/to/src n:c_srcs '*.c'
+
+# Second run: returns only *.c files changed since the first run
+watchman since /path/to/src n:c_srcs '*.c'
+```
+
+### Incremental polling with a clock ID
+
+```bash
+# Get initial state
+watchman since /path/to/src c:0:0
+
+# Store the returned clock, then on the next run:
+watchman since /path/to/src c:80616:59
+```
+
+### Equivalent query command
+
+The `since` command is shorthand for a `query` with the `since` generator. The following two commands are equivalent:
+
+```bash
+watchman since /path/to/src c:80616:59 '*.c'
+```
+
+```bash
+watchman -j <<< '["query", "/path/to/src", {
+  "since": "c:80616:59",
+  "expression": ["match", "*.c", "basename"],
+  "fields": ["name", "exists", "new", "size", "mode", "mtime", "ctime",
+             "uid", "gid", "ino", "dev", "nlink", "cclock", "oclock"]
+}]'
+```
+
+<Tip>
+  For complex filtering, use the [`query` command](/commands/query) directly. It gives you full control over generators, expressions, and the exact fields returned.
+</Tip>

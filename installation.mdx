@@ -1,0 +1,256 @@
+---
+title: "Install Watchman on macOS, Linux, Windows, or source"
+description: "Install Watchman on macOS, Linux, or Windows using Homebrew, MacPorts, Chocolatey, or prebuilt binaries, with system-specific tuning guidance."
+---
+
+Watchman runs on Linux (via `inotify`), macOS (via `FSEvents` on 10.7+), and Windows 10 64-bit and up. Choose the installation method that fits your platform and workflow below.
+
+<Tabs>
+  <Tab title="macOS">
+    ## macOS
+
+    <CodeGroup>
+
+    ```bash Homebrew
+    brew update
+    brew install watchman
+    ```
+
+    ```bash MacPorts
+    sudo port install watchman
+    ```
+
+    </CodeGroup>
+
+    <Note>
+      The Homebrew and MacPorts packages are community-maintained. To install the absolute latest build directly from GitHub, run `brew install --HEAD watchman`.
+    </Note>
+
+    ### Prebuilt binaries
+
+    <Steps>
+      <Step title="Download the release">
+        Download and extract the macOS release from the [latest release](https://github.com/facebook/watchman/releases/latest). The archive is named something like `watchman-vYYYY.MM.DD.00-macos.zip`.
+      </Step>
+      <Step title="Install the binaries">
+        ```bash
+        unzip watchman-*-macos.zip
+        cd watchman-vYYYY.MM.DD.00-macos
+        sudo mkdir -p /usr/local/{bin,lib} /usr/local/var/run/watchman
+        sudo cp bin/* /usr/local/bin
+        sudo cp lib/* /usr/local/lib
+        sudo chmod 755 /usr/local/bin/watchman
+        sudo chmod 2777 /usr/local/var/run/watchman
+        ```
+      </Step>
+      <Step title="Approve the binary (if required)">
+        The Watchman binaries are not signed. If macOS blocks the binary, open **System Preferences → Security & Privacy** and approve Watchman manually.
+      </Step>
+    </Steps>
+
+    ### File descriptor limits (macOS 10.6 and earlier only)
+
+    The default per-process descriptor limit on macOS 10.6 and earlier is 256. Watchman attempts to raise this automatically at startup, but if you run into issues you can raise the limits manually:
+
+    ```bash
+    sudo sysctl -w kern.maxfiles=10485760
+    sudo sysctl -w kern.maxfilesperproc=1048576
+    ```
+
+    To persist these values across reboots, add the following to `/etc/sysctl.conf`:
+
+    ```
+    kern.maxfiles=10485760
+    kern.maxfilesperproc=1048576
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ## Linux
+
+    ### Homebrew
+
+    If you use Homebrew on Linux, it provides a recent Watchman build and is the recommended approach:
+
+    ```bash
+    brew update
+    brew install watchman
+    ```
+
+    ### Fedora (prebuilt RPMs)
+
+    <Warning>
+      Do not install the Fedora-supplied Watchman package from the default repositories. It is outdated and missing security, bug, and performance fixes. Use the prebuilt RPMs from the official GitHub releases instead.
+    </Warning>
+
+    <Steps>
+      <Step title="Download the RPM">
+        From the [latest release](https://github.com/facebook/watchman/releases/latest), download the `.rpm` file that matches your Fedora version.
+      </Step>
+      <Step title="Install the package">
+        ```bash
+        sudo dnf localinstall watchman-$VERSION.fc$FEDORA_VERSION.x86_64.rpm
+        ```
+      </Step>
+      <Step title="Verify the installation">
+        ```bash
+        watchman version
+        ```
+      </Step>
+    </Steps>
+
+    ### Ubuntu (prebuilt debs)
+
+    <Warning>
+      Do not install the Ubuntu-supplied Watchman package from the default repositories. It is outdated and missing security, bug, and performance fixes. Use the prebuilt `.deb` files from the official GitHub releases instead.
+    </Warning>
+
+    <Steps>
+      <Step title="Download the deb">
+        From the [latest release](https://github.com/facebook/watchman/releases/latest), download the `.deb` file that matches your Ubuntu version.
+      </Step>
+      <Step title="Install the package">
+        ```bash
+        sudo dpkg -i watchman_${UBUNTU_RELEASE}_${VERSION}.deb
+        ```
+      </Step>
+      <Step title="Resolve dependencies">
+        ```bash
+        sudo apt-get -f install
+        ```
+      </Step>
+      <Step title="Verify the installation">
+        ```bash
+        watchman version
+        ```
+      </Step>
+    </Steps>
+
+    ### Prebuilt binaries
+
+    <Note>
+      Linux binaries are compiled on GitHub Actions (ubuntu-20.04) and are not generally compatible across all distributions. Try the Fedora RPMs, Ubuntu debs, or Homebrew packages first.
+    </Note>
+
+    <Steps>
+      <Step title="Download the release">
+        Download and extract the Linux release from the [latest release](https://github.com/facebook/watchman/releases/latest). The archive is named something like `watchman-vYYYY.MM.DD.00-linux.zip`.
+      </Step>
+      <Step title="Install the binaries">
+        ```bash
+        unzip watchman-*-linux.zip
+        cd watchman-vYYYY.MM.DD.00-linux
+        sudo mkdir -p /usr/local/{bin,lib} /usr/local/var/run/watchman
+        sudo cp bin/* /usr/local/bin
+        sudo cp lib/* /usr/local/lib
+        sudo chmod 755 /usr/local/bin/watchman
+        sudo chmod 2777 /usr/local/var/run/watchman
+        ```
+      </Step>
+    </Steps>
+
+    ### Building from source
+
+    <Steps>
+      <Step title="Get the source">
+        Download a [source snapshot from the latest release](https://github.com/facebook/watchman/releases/latest) or clone from GitHub:
+
+        ```bash
+        git clone https://github.com/facebook/watchman.git
+        cd watchman
+        ```
+      </Step>
+      <Step title="Ensure Cargo is installed">
+        Watchman's build process requires Rust. Install Cargo via your OS package manager or from [rustup.rs](https://rustup.rs/).
+
+        ```bash
+        cargo version
+        ```
+      </Step>
+      <Step title="Install system dependencies (optional)">
+        To save time, let Watchman's build process install system dependencies automatically:
+
+        ```bash
+        sudo ./install-system-packages.sh
+        ```
+      </Step>
+      <Step title="Build">
+        ```bash
+        ./autogen.sh
+        ```
+      </Step>
+    </Steps>
+
+    ### inotify limits
+
+    The Linux `inotify` subsystem has three kernel parameters that affect Watchman:
+
+    | Parameter | Effect |
+    |-----------|--------|
+    | `max_user_instances` | Controls how many separate root directories you can watch |
+    | `max_user_watches` | Controls the total number of directories watched across all roots |
+    | `max_queued_events` | Controls the kernel event queue depth; too small causes overflow and missed events |
+
+    If `max_queued_events` overflows, Watchman will re-crawl the entire directory tree to recover — you won't miss changes, but you may see spurious notifications for unmodified files.
+
+    To check and raise these limits:
+
+    ```bash
+    # Check current values
+    cat /proc/sys/fs/inotify/max_user_instances
+    cat /proc/sys/fs/inotify/max_user_watches
+    cat /proc/sys/fs/inotify/max_queued_events
+
+    # Raise limits for the current session
+    sudo sysctl fs.inotify.max_user_instances=8192
+    sudo sysctl fs.inotify.max_user_watches=524288
+    sudo sysctl fs.inotify.max_queued_events=131072
+    ```
+
+    To persist these values across reboots, add them to `/etc/sysctl.conf`:
+
+    ```
+    fs.inotify.max_user_instances=8192
+    fs.inotify.max_user_watches=524288
+    fs.inotify.max_queued_events=131072
+    ```
+  </Tab>
+  <Tab title="Windows">
+    ## Windows
+
+    Watchman supports Windows 10 (64-bit) and later. Windows 7 support is available through community patches.
+
+    <CodeGroup>
+
+    ```powershell Chocolatey
+    choco install watchman
+    ```
+
+    </CodeGroup>
+
+    <Note>
+      The Chocolatey package is community-maintained, not by Meta. For installation or uninstallation issues, [contact the package maintainers](https://chocolatey.org/packages/watchman/ContactOwners).
+    </Note>
+
+    ### Prebuilt binaries
+
+    <Steps>
+      <Step title="Download the release">
+        Download and extract the Windows release from the [latest release](https://github.com/facebook/watchman/releases/latest). The archive is named something like `watchman-vYYYY.MM.DD.00-windows.zip`.
+      </Step>
+      <Step title="Add to PATH">
+        The archive contains a `bin` folder. Move it to a location of your choice (for example, `C:\watchman\bin`) and add that path to your `PATH` environment variable.
+      </Step>
+      <Step title="Verify the installation">
+        Open a new terminal and run:
+
+        ```powershell
+        watchman version
+        ```
+      </Step>
+    </Steps>
+
+    <Note>
+      If you encounter issues with the Windows build, report them on GitHub. You can find the [list of known Windows issues](https://github.com/facebook/watchman/issues?q=is%3Aopen+Windows) there.
+    </Note>
+  </Tab>
+</Tabs>

@@ -1,0 +1,219 @@
+---
+title: "C++ File Watching with Watchman via WatchmanClient"
+description: "Learn how to integrate Watchman file watching into C++ applications using the WatchmanClient library built on Folly futures and async I/O."
+---
+
+Watchman ships a C++ client library (`WatchmanClient`) that provides a type-safe, future-based API for connecting to the Watchman daemon, executing commands, and subscribing to file change notifications. The library is built on top of [Folly](https://github.com/facebook/folly) and uses Folly's async I/O primitives and `folly::dynamic` for JSON-like data manipulation.
+
+## Installation
+
+The C++ client is built and installed automatically as part of Watchman when the Folly library is present at build time. No separate installation step is required. See the [Watchman installation guide](/installation) for build prerequisites.
+
+## Usage
+
+### Connecting and running commands
+
+The entry point is `watchman::WatchmanClient`. Construct it with a `folly::EventBase` and call `connect()`, which returns a `SemiFuture` that resolves with version and capability information.
+
+```cpp
+#include <watchman/cppclient/WatchmanClient.h>
+
+#include <folly/init/Init.h>
+#include <folly/io/async/ScopedEventBaseThread.h>
+
+int main(int argc, char** argv) {
+  const folly::Init init(&argc, &argv);
+
+  folly::ScopedEventBaseThread sebt;
+  auto eb = sebt.getEventBase();
+
+  watchman::WatchmanClient client(eb);
+
+  // Connect and run a one-shot command
+  client.connect()
+      .thenValue([&](folly::dynamic&& version) {
+        std::cout << "Connected, server version: " << version["version"]
+                  << std::endl;
+        return client.run(folly::dynamic::array("watch-list"));
+      })
+      .thenValue([](folly::dynamic&& result) {
+        std::cout << result << std::endl;
+      })
+      .wait();
+
+  client.close();
+  return 0;
+}
+```
+
+### Watching a path and subscribing to changes
+
+`watch()` uses `watch-project` semantics, automatically sharing OS resources when multiple watchers cover the same tree. `subscribe()` registers a callback that is invoked on a specified executor whenever matching files change.
+
+```cpp
+watchman::WatchmanClient client(&eb);
+
+auto subFuture = client.connect()
+    .thenValue([&](folly::dynamic&& response) {
+      std::cout << "Server version " << response["version"] << std::endl;
+
+      return client.watch("/some/path").thenValue([&](watchman::WatchPathPtr watch) {
+        folly::dynamic query = folly::dynamic::object("fields",
+            folly::dynamic::array("name"));
+
+        return client.subscribe(
+            query,
+            watch,
+            &eb,
+            [](folly::Try<folly::dynamic>&& data) {
+              if (data.hasValue()) {
+                std::cout << "File update: " << data.value() << std::endl;
+              } else {
+                std::cout << "Error: " << data.exception() << std::endl;
+              }
+            },
+            "my-subscription");
+      });
+    });
+
+// Wait for the subscription to be established
+auto subscription = subFuture.wait().value();
+
+// ... do work ...
+
+// Unsubscribe (optional — closing the connection also cancels all subscriptions)
+client.unsubscribe(subscription).wait();
+client.close();
+```
+
+### Flushing a subscription
+
+To ensure all outstanding updates have been received before proceeding, use `flushSubscription`:
+
+```cpp
+client.flushSubscription(subscription, std::chrono::milliseconds(5000)).wait();
+```
+
+---
+
+## API reference
+
+All methods are members of `watchman::WatchmanClient` in the `watchman` namespace. Methods return `folly::SemiFuture` values; transport and protocol errors are captured as exceptions in the future.
+
+### `WatchmanClient(eventBase, sockPath, cpuExecutor, errCb)`
+
+Constructs a client. Only `eventBase` is required.
+
+| Parameter     | Type                         | Description                                          |
+| ------------- | ---------------------------- | ---------------------------------------------------- |
+| `eventBase`   | `folly::EventBase*`          | Event base for async I/O operations.                 |
+| `sockPath`    | `std::optional<std::string>` | Path to the Watchman socket. Auto-discovered if empty. |
+| `cpuExecutor` | `folly::Executor*`           | Optional executor for CPU-bound work.                |
+| `errCb`       | `ErrorCallback`              | Optional callback invoked on connection errors.      |
+
+---
+
+### `connect(versionArgs)`
+
+Establishes a connection to the Watchman server. Returns a `SemiFuture<folly::dynamic>` that resolves with version and capability information. Accepts optional version arguments to request specific capabilities.
+
+---
+
+### `run(cmd)`
+
+Executes a single Watchman command and returns the response as `SemiFuture<folly::dynamic>`. `cmd` is typically a `folly::dynamic::array`. See the [socket interface docs](/socket-interface) for command conventions.
+
+---
+
+### `watch(path)`
+
+Creates a watch for the given path using `watch-project` semantics. Returns `SemiFuture<WatchPathPtr>`. Use the returned `WatchPathPtr` with `subscribe()` and `query()`.
+
+---
+
+### `getClock(path)`
+
+Asks Watchman for the current clock value for a given root. Returns `SemiFuture<Clock>` (where `Clock` is `std::string`).
+
+---
+
+### `query(queryObj, path)`
+
+Sends a one-shot query to Watchman. Returns `SemiFuture<QueryResult>`. `queryObj` is an object (not an array) as described in the [file query docs](/guides/file-queries).
+
+---
+
+### `subscribe(query, path, executor, callback, subscriptionName)`
+
+Establishes a subscription. The `callback` is invoked via `executor` whenever matching files change. Returns `SemiFuture<SubscriptionPtr>`.
+
+An overload accepts a `std::string_view` path directly instead of a `WatchPathPtr`.
+
+---
+
+### `flushSubscription(subscription, timeout)`
+
+Waits until all outstanding Watchman updates for a subscription have been received or the timeout elapses. Returns `SemiFuture<folly::dynamic>`.
+
+---
+
+### `unsubscribe(subscription)`
+
+Cancels an existing subscription. Returns `SemiFuture<folly::dynamic>`.
+
+---
+
+### `close()`
+
+Closes the connection and automatically unsubscribes from all active subscriptions. Destruction also closes the connection.
+
+---
+
+### `isDead()`
+
+Returns `true` if the underlying connection is closed or broken.
+
+---
+
+## Building with pkg-config
+
+The client library ships a `watchmanclient.pc` pkg-config file. Use it to obtain the correct compiler and linker flags for your build system.
+
+**GNU Make (single file):**
+
+```bash
+make LDFLAGS="$(pkg-config watchmanclient --libs)" \
+     CPPFLAGS="$(pkg-config watchmanclient --cflags)" \
+     app
+```
+
+If Watchman is installed outside the default pkg-config search paths, set `PKG_CONFIG_PATH` first:
+
+```bash
+export PKG_CONFIG_PATH=<watchman-install-path>/lib/pkgconfig:$PKG_CONFIG_PATH
+```
+
+---
+
+## Examples in the source tree
+
+<CardGroup cols={2}>
+  <Card title="cppclient/CLI.cpp" icon="terminal">
+    A minimal command-line tool that connects to Watchman and runs a single
+    request-response command. Good starting point for understanding
+    `WatchmanConnection` and the future chain pattern.
+  </Card>
+  <Card title="integration/cppclient.cpp" icon="code">
+    An integration test that demonstrates the full subscription workflow,
+    including setting up watches, subscribing with a query expression, and
+    handling incoming file change events.
+  </Card>
+</CardGroup>
+
+<Note>
+  The C++ client makes heavy use of Folly. Familiarity with
+  [Folly futures](https://github.com/facebook/folly/blob/master/folly/futures/README.md)
+  and
+  [Folly dynamics](https://github.com/facebook/folly/blob/master/folly/docs/Dynamic.md)
+  is strongly recommended before building on this library.
+</Note>

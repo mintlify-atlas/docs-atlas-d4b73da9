@@ -1,0 +1,67 @@
+---
+title: "watch-del — remove a watched root and all triggers"
+description: "Stop watching a directory root and remove all associated triggers and subscriptions, persisting the removal across Watchman service restarts by default."
+---
+
+`watch-del` removes a single directory root from Watchman's active watch set. When a watch is deleted, every trigger and subscription attached to that root is also cancelled. By default the removal is written to the state file, so the watch is not re-established when the Watchman service restarts.
+
+## Syntax
+
+```bash
+watchman watch-del <path>
+```
+
+## Parameters
+
+<ParamField path="path" type="string" required>
+  Absolute path of the watch root to remove. This must match the watch root exactly as reported by [`watch-list`](/commands/watch-list) — that is, the resolved project root, not necessarily the path you originally passed to `watch-project`.
+</ParamField>
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="root" type="string" required>
+  Absolute path of the watch root that was removed.
+</ResponseField>
+
+<ResponseField name="success" type="boolean" required>
+  `true` when the watch was found and removed successfully.
+</ResponseField>
+
+## Examples
+
+### CLI
+
+```bash
+watchman watch-del /path/to/dir
+```
+
+### JSON protocol
+
+```json
+["watch-del", "/path/to/dir"]
+```
+
+## What gets removed
+
+Deleting a watch removes:
+
+- The kernel change-notification subscription for the directory and all its subdirectories.
+- All triggers registered against that watch root.
+- All active subscriptions against that watch root.
+- The entry in the Watchman state file (so the watch is not restored on restart).
+
+## Persistence and --no-save-state
+
+<Warning>
+  If the Watchman service was started with `--no-save-state`, removing a watch only affects the running process. The state file is not updated. If that same directory path appears in the existing state file, the watch will be re-established automatically when the service next restarts.
+</Warning>
+
+## Notes
+
+- Use [`watch-list`](/commands/watch-list) first to confirm the exact path of the watch root you want to remove.
+- Removing a watch that does not exist is not an error.
+- To remove all watches at once, use [`watch-del-all`](/commands/watch-del-all).

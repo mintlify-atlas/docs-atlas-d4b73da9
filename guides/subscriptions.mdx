@@ -1,0 +1,248 @@
+---
+title: "Subscribing to real-time Watchman file notifications"
+description: "Set up push-based file change subscriptions in Watchman over a persistent socket connection, with settling, VCS deferral, and Node.js examples."
+---
+
+Subscriptions are Watchman's push-based notification model. Rather than polling or spawning a process on each change, a subscriber holds an open connection to the Watchman socket and receives change notifications as they occur. This makes subscriptions the right choice for long-lived applications such as development servers, language servers, and build tools that need low-latency, continuous change feeds.
+
+## Subscriptions vs polling vs triggers
+
+| Mechanism | How it works | Best for |
+|-----------|-------------|----------|
+| Polling (`query`) | Client sends a query on demand | Batch jobs, infrequent checks |
+| **Subscriptions** | Server pushes updates over an open socket | Long-lived processes, dev tools |
+| Triggers | Server spawns a command process on change | Automation scripts, build hooks |
+
+Subscriptions are the most efficient mechanism for applications that are always running. The connection stays open, so there is no per-notification startup cost.
+
+## Establishing a subscription
+
+<Steps>
+  <Step title="Open a persistent connection">
+    Subscriptions require a persistent socket connection to the Watchman server. Client libraries such as `fb-watchman` for Node.js manage this automatically. On the CLI, pass `-p` (persistent) to keep the connection open:
+
+    ```bash
+    watchman -j --server-encoding=json -p <<-EOT
+    ["subscribe", "/path/to/root", "mysubscription", {
+      "expression": ["allof",
+        ["type", "f"],
+        ["not", "empty"],
+        ["suffix", "js"]
+      ],
+      "fields": ["name"]
+    }]
+    EOT
+    ```
+  </Step>
+
+  <Step title="Receive the acknowledgement">
+    Watchman responds immediately with a confirmation that the subscription has been registered:
+
+    ```json
+    {
+      "version": "1.6",
+      "subscribe": "mysubscription"
+    }
+    ```
+
+    The subscription name is scoped to your connection. Multiple clients can use the same name without conflict.
+  </Step>
+
+  <Step title="Process incoming notifications">
+    After the initial acknowledgement, Watchman evaluates the subscription expression against the current file tree and sends a notification for any files that match. From then on, each time files change and the settle period has elapsed, Watchman re-evaluates the expression and sends another notification for matched files:
+
+    ```json
+    {
+      "version": "1.6",
+      "clock": "c:1234:123",
+      "files": ["src/index.js", "src/utils.js"],
+      "root": "/path/to/root",
+      "subscription": "mysubscription"
+    }
+    ```
+
+    The `clock` field in the notification is the current clock value. Store this value and use it in the `since` parameter when you re-subscribe after a reconnect to avoid replaying old events.
+  </Step>
+
+  <Step title="Constrain to changes since a known clock">
+    To skip the initial full-tree scan and receive only files changed since a specific point, pass a `since` parameter when subscribing:
+
+    ```json
+    ["subscribe", "/path/to/root", "mysubscription", {
+      "since": "c:1234:123",
+      "expression": ["not", "empty"],
+      "fields": ["name"]
+    }]
+    ```
+
+    The recommended pattern is to persist the last received `clock` value and supply it here on the next connection.
+  </Step>
+
+  <Step title="Cancel the subscription">
+    When you no longer need updates, send an `unsubscribe` command. If the connection is closed, Watchman removes the subscription automatically.
+
+    ```json
+    ["unsubscribe", "/path/to/root", "mysubscription"]
+    ```
+  </Step>
+</Steps>
+
+## Notification response fields
+
+| Field | Description |
+|-------|-------------|
+| `version` | Watchman server version |
+| `clock` | Clock value at the time of notification; use as `since` on reconnect |
+| `files` | Array of files (or file objects if you requested multiple `fields`) that matched the expression |
+| `root` | Absolute path to the watched root |
+| `subscription` | Name of the subscription that generated this notification |
+| `is_fresh_instance` | `true` on the first notification if no `since` clock was provided |
+
+## Filesystem settling
+
+Watchman waits for filesystem activity to settle before dispatching subscription notifications. This batching prevents your application from receiving dozens of rapid-fire events during a single save operation.
+
+Starting in Watchman 3.2, if the watch root appears to be a version control repository, Watchman additionally holds notifications while a VCS operation is in progress. It detects operations by looking for lock files such as `.hg/wlock` and `.git/index.lock`. This prevents your tool from reacting to the hundreds of file changes that occur mid-rebase.
+
+To observe the creation of VCS lock files yourself — for example, to show a "rebase in progress" indicator — set `defer_vcs` to `false`:
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "expression": ["type", "f"],
+  "defer_vcs": false,
+  "fields": ["name"]
+}]
+```
+
+## Advanced settling with `defer` and `drop`
+
+_Since Watchman 4.4._
+
+For finer control over notifications during application-defined state transitions, use the `defer` and `drop` options. A Watchman-aware application signals state changes with `state-enter` and `state-leave` commands.
+
+### defer
+
+`defer` pauses the notification stream while a named state is active, then delivers all accumulated notifications once the state is vacated.
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "defer": ["hg.update"],
+  "fields": ["name"]
+}]
+```
+
+When a client issues `state-enter` for `hg.update`, subscribers with that state in their `defer` list receive a state notification:
+
+```json
+{
+  "subscription": "mysubscription",
+  "root": "/path/to/root",
+  "state-enter": "hg.update",
+  "clock": "<clock>",
+  "metadata": {}
+}
+```
+
+Notifications with file payloads are held. Once `state-leave` is signaled, subscribers receive a leave notification and all deferred file notifications are delivered.
+
+### drop
+
+`drop` works like `defer`, but instead of delivering the queued notifications after the state ends, Watchman discards them. The subscription clock is fast-forwarded to the moment of `state-leave`.
+
+```json
+["subscribe", "/path/to/root", "mysubscription", {
+  "drop": ["hg.update"],
+  "fields": ["name"]
+}]
+```
+
+Use `drop` when the state change makes the intermediate file events irrelevant — for example, when a VCS update has already resolved which files are current.
+
+<Warning>Mixing `defer` and `drop` with multiple overlapping states on a single subscription is complex. If you need both behaviors, use `drop` for all states and issue explicit `query` commands bounded by the clock values from `state-enter` and `state-leave` notifications.</Warning>
+
+## Source control aware subscriptions
+
+Watchman also supports subscriptions that track merge-base changes, returning a minimized set of files even across large rebases. See [source control aware queries](/guides/scm-queries) for details.
+
+## Complete Node.js example
+
+The `fb-watchman` package provides a Node.js client for Watchman. Install it with:
+
+```bash
+npm install fb-watchman
+```
+
+The following example checks server capabilities, establishes a watch, and subscribes to `.js` file changes:
+
+```javascript
+var watchman = require('fb-watchman');
+var client = new watchman.Client();
+
+client.capabilityCheck(
+  { optional: [], required: ['relative_root'] },
+  function (error, resp) {
+    if (error) {
+      console.error('watchman not available:', error);
+      client.end();
+      return;
+    }
+
+    var dir = process.cwd();
+
+    client.command(['watch-project', dir], function (error, resp) {
+      if (error) {
+        console.error('Error initiating watch:', error);
+        return;
+      }
+
+      if ('warning' in resp) {
+        console.warn('watchman warning:', resp.warning);
+      }
+
+      var watch = resp.watch;
+      var relative_path = resp.relative_path;
+
+      // Get the current clock so the subscription only delivers
+      // files changed after this point.
+      client.command(['clock', watch], function (error, resp) {
+        if (error) {
+          console.error('Failed to get clock:', error);
+          return;
+        }
+
+        var sub = {
+          expression: ["allof", ["match", "*.js"]],
+          fields: ["name", "size", "mtime_ms", "exists", "type"],
+          since: resp.clock
+        };
+
+        if (relative_path) {
+          sub.relative_root = relative_path;
+        }
+
+        client.command(['subscribe', watch, 'mysubscription', sub],
+          function (error, resp) {
+            if (error) {
+              console.error('failed to subscribe:', error);
+              return;
+            }
+            console.log('subscription established:', resp.subscribe);
+          });
+      });
+    });
+  }
+);
+
+// All subscriptions emit on this event, identified by resp.subscription.
+client.on('subscription', function (resp) {
+  if (resp.subscription !== 'mysubscription') return;
+
+  resp.files.forEach(function (file) {
+    // mtime_ms is delivered as an Int64; coerce to a JS number.
+    var mtime = +file.mtime_ms;
+    console.log('changed:', file.name, 'exists:', file.exists, 'mtime:', mtime);
+  });
+});
+```
+
+<Note>Subscription names are scoped to the client connection. Multiple clients can register the same name independently without interfering with each other.</Note>

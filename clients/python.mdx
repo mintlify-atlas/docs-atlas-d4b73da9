@@ -1,0 +1,229 @@
+---
+title: "Python File Watching with Watchman using pywatchman"
+description: "Learn how to connect to Watchman from Python using pywatchman to watch directories, run queries, and subscribe to real-time file change events."
+---
+
+The `pywatchman` package provides a synchronous Python client for the Watchman file watching service. A companion package, `pywatchman_aio`, offers an `asyncio`-based client for use in async Python applications. Both communicate with the local Watchman daemon over a Unix domain socket (or named pipe on Windows) using the efficient BSER binary protocol.
+
+## Installation
+
+```bash
+pip install pywatchman
+```
+
+<Note>
+  `pywatchman` requires Python 3.8 or later and a running Watchman service. See
+  the [Watchman installation guide](/installation) for platform-specific
+  instructions.
+</Note>
+
+## Getting started
+
+<Steps>
+  <Step title="Import and create a client">
+    ```python
+    import pywatchman
+
+    client = pywatchman.client()
+    ```
+
+    The client connects lazily — the underlying socket is opened the first time a query is issued.
+  </Step>
+
+  <Step title="Check server capabilities">
+    Call `capabilityCheck` to verify that the server supports the features your application requires.
+
+    ```python
+    resp = client.capabilityCheck(
+        optional=[],
+        required=['relative_root'],
+    )
+    # resp: {'version': '2023.x.x', 'capabilities': {'relative_root': True}}
+    print(resp)
+    ```
+  </Step>
+
+  <Step title="Watch a directory">
+    Use the `watch-project` command to register a directory tree with Watchman. The response may include a `relative_path` if Watchman consolidates the watch with a higher-level tree.
+
+    ```python
+    resp = client.query('watch-project', '/path/to/project')
+
+    if 'warning' in resp:
+        print('warning:', resp['warning'])
+
+    watch = resp['watch']
+    relative_path = resp.get('relative_path')
+    print('watching', watch, 'relative_path', relative_path)
+    ```
+  </Step>
+
+  <Step title="Query for matching files">
+    Run an ad-hoc query against the watched tree. The expression language lets you filter by name, type, size, modification time, and more.
+
+    ```python
+    query = {
+        'expression': ['allof', ['match', '*.py']],
+        'fields': ['name', 'size', 'mtime_ms', 'exists'],
+    }
+    if relative_path:
+        query['relative_root'] = relative_path
+
+    result = client.query('query', watch, query)
+    for f in result.get('files', []):
+        print(f['name'], f['mtime_ms'])
+    ```
+  </Step>
+
+  <Step title="Subscribe to file changes">
+    Issue a `subscribe` command, then poll with `getSubscription` to retrieve buffered change notifications.
+
+    ```python
+    sub_query = {
+        'expression': ['allof', ['match', '*.py']],
+        'fields': ['name', 'exists', 'type'],
+    }
+    if relative_path:
+        sub_query['relative_root'] = relative_path
+
+    client.query('subscribe', watch, 'my-subscription', sub_query)
+
+    # Later, poll for pending updates:
+    data = client.getSubscription('my-subscription')
+    if data:
+        for update in data:
+            for f in update.get('files', []):
+                print('changed:', f['name'])
+    ```
+  </Step>
+</Steps>
+
+## Using the context manager
+
+The `client` class implements the context manager protocol. Using it with `with` ensures the socket is closed cleanly on exit.
+
+```python
+import pywatchman
+
+with pywatchman.client() as client:
+    resp = client.query('watch-project', '/path/to/project')
+    watch = resp['watch']
+
+    result = client.query('query', watch, {
+        'expression': ['suffix', 'py'],
+        'fields': ['name'],
+    })
+    for f in result.get('files', []):
+        print(f['name'])
+```
+
+## Async usage with `pywatchman_aio`
+
+For `asyncio` applications, use `AIOClient` from `pywatchman_aio`. It provides the same query interface over an async Unix socket transport.
+
+```python
+import asyncio
+import pywatchman_aio
+
+async def main():
+    async with await pywatchman_aio.AIOClient.from_socket() as client:
+        resp = await client.query('watch-project', '/path/to/project')
+        watch = resp['watch']
+        relative_path = resp.get('relative_path')
+
+        sub_query = {
+            'expression': ['allof', ['match', '*.py']],
+            'fields': ['name', 'exists', 'type'],
+        }
+        if relative_path:
+            sub_query['relative_root'] = relative_path
+
+        await client.query('subscribe', watch, 'my-sub', sub_query)
+
+        while True:
+            update = await client.get_subscription('my-sub', watch)
+            for f in update.get('files', []):
+                print('changed:', f['name'])
+
+asyncio.run(main())
+```
+
+<Info>
+  `AIOClient.from_socket()` automatically resolves the Watchman socket path and
+  starts the background receive loop. Pass a `sockname` argument to connect to a
+  specific socket instead.
+</Info>
+
+---
+
+## API reference
+
+### `pywatchman.client([sockpath][, timeout][, ...])`
+
+Creates a new synchronous Watchman client. All arguments are optional.
+
+| Parameter        | Default  | Description                                                  |
+| ---------------- | -------- | ------------------------------------------------------------ |
+| `sockpath`       | auto     | Path to the Watchman Unix socket. Auto-discovered if omitted. |
+| `timeout`        | `1.0`    | Socket read timeout in seconds.                              |
+| `transport`      | `local`  | Transport type: `local`, `tcp`, `cli`, or `namedpipe`.       |
+| `useImmutableBser` | `False` | Decode BSER responses into immutable objects.               |
+
+---
+
+### `client.query(*args)`
+
+Sends a command to the Watchman service and returns the response synchronously. Blocks until the response is received. Unilateral responses (subscriptions, log messages) are buffered internally and not returned from this method.
+
+```python
+resp = client.query('watch-project', '/some/path')
+```
+
+---
+
+### `client.capabilityCheck(optional=None, required=None)`
+
+Issues a `version` command to verify server capabilities. Raises `pywatchman.CommandError` if any `required` capability is not supported.
+
+```python
+resp = client.capabilityCheck(
+    optional=['suffix-set'],
+    required=['relative_root'],
+)
+```
+
+---
+
+### `client.getSubscription(name, remove=True, root=None)`
+
+Returns buffered subscription data for the named subscription. Returns `None` if no data is available. By default the data is removed from the internal buffer; pass `remove=False` to leave it in place.
+
+---
+
+### `client.receive()`
+
+Reads the next PDU from the Watchman service. May return a unilateral subscription or log PDU instead of a command response. Used for polling in a loop when driving subscriptions manually.
+
+---
+
+### `client.setTimeout(value)`
+
+Sets the socket read timeout in seconds.
+
+---
+
+### `client.close()`
+
+Closes the underlying transport connection.
+
+---
+
+## Exception types
+
+| Exception                        | Description                                              |
+| -------------------------------- | -------------------------------------------------------- |
+| `pywatchman.WatchmanError`       | Base class for all client errors.                        |
+| `pywatchman.CommandError`        | Server returned an error in the response.                |
+| `pywatchman.SocketConnectError`  | Could not connect to the Watchman socket.                |
+| `pywatchman.SocketTimeout`       | Socket read timed out.                                   |
+| `pywatchman.UseAfterFork`        | Client was reused across a `fork()` call.                |

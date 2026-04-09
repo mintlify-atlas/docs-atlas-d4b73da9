@@ -1,0 +1,71 @@
+---
+title: "get-sockname — discover the Watchman Unix socket path"
+description: "Return the Unix socket path that the Watchman server listens on, automatically spawning the service for your user if it is not running."
+---
+
+The `get-sockname` command returns the filesystem path of the Unix domain socket that the Watchman server is listening on. Client libraries and integrations that speak the JSON or BSER wire protocol directly need this path to open a socket connection without replicating Watchman's own path-discovery logic.
+
+As a side effect, running `get-sockname` spawns the Watchman service for your user if it is not already running.
+
+## Syntax
+
+```bash
+watchman get-sockname
+```
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="sockname" type="string" required>
+  Absolute path to the Unix domain socket, for example `/tmp/.watchman.alice`.
+</ResponseField>
+
+## Example
+
+```bash
+$ watchman get-sockname
+{
+  "version": "2.5",
+  "sockname": "/tmp/.watchman.wez"
+}
+```
+
+## Building a direct socket client
+
+When you need lower latency or want to avoid fork/exec overhead on every command, connect to Watchman directly over its Unix socket rather than invoking the CLI binary. Use `get-sockname` to discover the path at startup:
+
+```javascript Node.js
+var net = require('net');
+var child_process = require('child_process');
+
+// Ask the CLI for the socket path, which also starts the server if needed
+var result = child_process.spawnSync('watchman', ['get-sockname'], {
+  encoding: 'utf8'
+});
+var sockname = JSON.parse(result.stdout).sockname;
+
+var socket = net.createConnection(sockname, function () {
+  console.log('connected to Watchman at', sockname);
+});
+```
+
+<Tip>
+In practice, prefer the `fb-watchman` npm package over raw socket connections. It handles BSER framing, reconnection, and the `$WATCHMAN_SOCK` environment variable automatically.
+</Tip>
+
+## The $WATCHMAN_SOCK environment variable
+
+When Watchman spawns a [trigger](/commands/trigger) process, it sets `WATCHMAN_SOCK` in the child's environment to the socket path. Trigger scripts can use this variable to connect back to the server without running `get-sockname`:
+
+```bash
+# Inside a trigger script
+echo '["watch-list"]' | nc -U "$WATCHMAN_SOCK"
+```
+
+## Notes
+
+- The socket path varies by user and by the `--sockname` CLI option. Never hardcode it.
+- If you need to connect from a language that lacks an official Watchman client library, use `get-sockname` at startup and then speak the [JSON or BSER wire protocol](/socket-interface) directly over the returned socket path.

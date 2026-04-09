@@ -1,0 +1,56 @@
+---
+title: "shutdown-server — gracefully stop the Watchman service"
+description: "Gracefully stop the Watchman server process, persisting watches, triggers, and subscriptions to disk so they are restored automatically on next start."
+---
+
+The `shutdown-server` command tells the running Watchman service to exit cleanly. Before stopping, Watchman saves its state — registered watches, triggers, and subscriptions — to disk so they are restored automatically the next time a Watchman command is run.
+
+## Syntax
+
+```bash
+watchman shutdown-server
+```
+
+## When to use this command
+
+You need to restart the server in several common situations:
+
+- **After editing `/etc/watchman.json` or `~/.watchman`** — Watchman reads global configuration only at startup. Changes to settings such as `root_files`, `idle_reap_age_seconds`, or filesystem watcher backends require a restart to take effect.
+- **Clearing an error state** — If Watchman has logged repeated errors about inotify limits or a stale watch, shutting down and restarting often resolves the issue.
+- **Applying a new Watchman binary** — After upgrading Watchman, shut down the old server so the new version starts on the next command.
+
+## State saving
+
+By default Watchman writes its state to a file (typically `~/.watchman-state`) before exiting. On the next startup, watches and triggers defined before the shutdown are reinstated automatically.
+
+<Warning>
+If the server was originally started with the `-n` / `--no-save-state` flag, no state is persisted. All watches and triggers must be recreated after restarting.
+</Warning>
+
+## Full reset: shutdown with watch-del-all
+
+To completely clear Watchman's state rather than restore it, delete all watches before shutting down:
+
+```bash
+watchman watch-del-all && watchman shutdown-server
+```
+
+The next `watchman` invocation starts a fresh server with no watches registered.
+
+## Example
+
+```bash
+$ watchman shutdown-server
+{
+  "version": "6.0.0",
+  "shutdown-server": true
+}
+```
+
+After the command returns, the server process has exited. The next Watchman command you run will spawn a new server instance automatically.
+
+## Notes
+
+- The command always returns a success response (the server sends the response before exiting).
+- If no server is running, the CLI will attempt to spawn one, immediately receive the shutdown command, and exit — resulting in no lasting server process.
+- For scripted restarts, chain the commands: `watchman shutdown-server && watchman version` — the second command spawns the new server and confirms it is healthy.

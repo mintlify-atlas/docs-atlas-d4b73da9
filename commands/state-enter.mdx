@@ -1,0 +1,95 @@
+---
+title: "state-enter — assert a named state on a watched root"
+description: "Mark a watched root as being in a named state so subscriptions can defer or drop file change notifications during VCS operations and bulk updates."
+---
+
+The `state-enter` command marks a watched root as being in a named state. States are a coordination mechanism that let tools — such as version control systems — signal to Watchman subscribers that a bulk file-changing operation is in progress. Subscribers can react by deferring notifications until the operation completes or by dropping notifications generated during that window entirely. Available since Watchman 4.4.
+
+## Syntax
+
+```json
+["state-enter", "<root>", "<statename>"]
+```
+
+With metadata:
+
+```json
+["state-enter", "<root>", {
+  "name": "<statename>",
+  "metadata": <any JSON value>
+}]
+```
+
+## Parameters
+
+<ParamField body="name" type="string" required>
+  The name of the state to enter. This name is matched against the `defer` and `drop` lists in subscriber configurations.
+</ParamField>
+
+<ParamField body="metadata" type="any">
+  Optional arbitrary JSON value that is forwarded verbatim to all subscribers via the unilateral state-enter notification. Watchman does not interpret this value.
+</ParamField>
+
+<ParamField body="sync_timeout" type="number" default="60000">
+  Timeout in milliseconds for filesystem synchronization before the state is entered. If the synchronization cookie is not observed within this window, the command returns an error and the state is not entered. Set to `0` to disable synchronization.
+</ParamField>
+
+## How states interact with subscriptions
+
+When a state is entered, Watchman notifies all active subscribers with a unilateral PDU:
+
+```json
+{
+  "subscription": "mysubscriptionname",
+  "root":         "/path/to/root",
+  "state-enter":  "mystate",
+  "clock":        "c:1446410081:18462:7:127"
+}
+```
+
+Subscribers that list the state name in their `defer` field pause their file notification stream until the state is vacated. Subscribers that list it in their `drop` field also pause, but discard all file notifications accumulated during the state window when it ends.
+
+The state remains asserted until either:
+- A corresponding [`state-leave`](/commands/state-leave) command is issued by the same client session.
+- The client session that entered the state disconnects. This automatic cleanup prevents subscribers from being permanently stalled if a tool exits unexpectedly.
+
+## Examples
+
+**Signal the start of a VCS update**
+
+```json
+["state-enter", "/path/to/root", "hg.update"]
+```
+
+**Signal the start of a VCS update with metadata**
+
+```json
+["state-enter", "/path/to/root", {
+  "name": "hg.update",
+  "metadata": {
+    "rev": "abc123",
+    "distance": 42
+  }
+}]
+```
+
+**Specify a longer sync timeout for a large repository**
+
+```json
+["state-enter", "/path/to/root", {
+  "name": "hg.update",
+  "sync_timeout": 120000
+}]
+```
+
+## Synchronization
+
+`state-enter` performs filesystem query synchronization before asserting the state. This ensures the clock reported in the state notification accurately reflects the filesystem at the moment the state began, so subscribers can later use the `state-enter` and `state-leave` clocks to bound `since` queries for changes that occurred during the operation.
+
+<Warning>
+  Only the client session that called `state-enter` can call the corresponding `state-leave`. If that client disconnects before calling `state-leave`, Watchman automatically vacates the state and notifies subscribers with `"abandoned": true`.
+</Warning>
+
+<Note>
+  To configure a subscription to defer or drop notifications during a state, set the `defer` or `drop` fields when registering the subscription with the [`subscribe`](/commands/subscribe) command.
+</Note>

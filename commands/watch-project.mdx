@@ -1,0 +1,101 @@
+---
+title: "watch-project — preferred command for watching paths"
+description: "Register a watch at the nearest project root containing a given path, consolidating overlapping watches to stay within OS inotify limits."
+---
+
+`watch-project` is the preferred way to register a directory for file watching in Watchman. Rather than watching the exact path you provide, it walks up the filesystem tree to find the nearest _project root_ — the directory containing a `.watchmanconfig` file or another marker listed in the `root_files` global config — and establishes the watch there. This consolidation strategy keeps the total number of kernel watches low, which matters because most operating systems cap the number of directories that can be watched concurrently.
+
+## Syntax
+
+```bash
+watchman watch-project <path>
+```
+
+## Parameters
+
+<ParamField path="path" type="string" required>
+  Absolute or shell-expanded path to the directory you want to watch. Watchman resolves this through `realpath(3)` before beginning the project-root search. On the CLI the shell expands `~`, but in the JSON protocol you must supply an absolute path yourself.
+</ParamField>
+
+## How the project root is found
+
+Watchman runs the following procedure to locate the project root:
+
+<Steps>
+  <Step title="Search for .watchmanconfig">
+    Starting from the resolved path, Watchman walks up the directory tree looking for a `.watchmanconfig` file. The first directory that contains one is used as the watch root.
+  </Step>
+  <Step title="Fall back to root_files">
+    If no `.watchmanconfig` is found, Watchman repeats the walk using the list of filenames in the global [`root_files`](/configuration#root_files) configuration option (defaults include `.git`, `.hg`, `.svn`, and similar VCS markers).
+  </Step>
+  <Step title="Fall back to the requested path">
+    If neither search succeeds and [`enforce_root_files`](/configuration#enforce_root_files) is `false` (the default), Watchman falls back to watching the original argument. If `enforce_root_files` is `true`, the command fails instead.
+  </Step>
+</Steps>
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="watch" type="string" required>
+  Absolute path of the directory that was actually registered as the watch root. This may be an ancestor of the path you requested.
+</ResponseField>
+
+<ResponseField name="relative_path" type="string">
+  The path from `watch` to the directory you requested. Present only when the two differ — that is, when the watch root is an ancestor of the requested path. When absent, the requested path and the watch root are the same.
+</ResponseField>
+
+<ResponseField name="warning" type="string">
+  Optional human-readable warning, for example when a watch is created on a filesystem type that has known limitations.
+</ResponseField>
+
+## Using relative_path in subsequent commands
+
+When `relative_path` is present in the response, every subsequent query, trigger, or subscription you issue against this watch must account for it. Watchman operates relative to the watch root, not to the path you originally requested.
+
+The typical pattern is to pass `relative_path` as the `relative_root` field in queries:
+
+```json
+["query", "/Users/wez/www", {
+  "relative_root": "some/child/dir",
+  "expression": ["allof", ["type", "f"], ["not", "empty"]],
+  "fields": ["name"]
+}]
+```
+
+This scopes query results to `some/child/dir` within the `~/www` watch without needing a separate watch entry.
+
+## Examples
+
+### CLI
+
+```bash
+watchman watch-project ~/www/some/child/dir
+```
+
+```json
+{
+  "version": "3.1.0",
+  "watch": "/Users/wez/www",
+  "relative_path": "some/child/dir"
+}
+```
+
+In this example, `~/www` contains a `.hg` directory (a default `root_files` entry), so Watchman establishes the watch there and returns `relative_path` to indicate the offset.
+
+### JSON protocol
+
+When using the JSON protocol you must supply an absolute path:
+
+```json
+["watch-project", "/Users/wez/www/some/child/dir"]
+```
+
+## Notes
+
+- **Available since Watchman 3.1.** Use `watch-project` instead of [`watch`](/commands/watch) for all new integrations.
+- Watches are persisted across server restarts unless Watchman was started with `--no-save-state`.
+- Since version 3.7, Watchman may reap watches that have been idle (no queries, no triggers, no active subscriptions) for longer than [`idle_reap_age_seconds`](/configuration#idle_reap_age_seconds) (default: 5 days).
+- If a watch is already established at or above the requested path, `watch-project` reuses it at no additional cost.

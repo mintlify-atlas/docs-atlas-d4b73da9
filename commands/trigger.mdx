@@ -1,0 +1,145 @@
+---
+title: "trigger — run a command when files change in a root"
+description: "Register a persistent trigger that spawns a process whenever files matching a query expression change under a watched root directory."
+---
+
+The `trigger` command creates or replaces a named trigger on a watched root. When files change that match the configured expression, Watchman spawns the specified command and passes information about the changed files to it. Triggers persist across Watchman server restarts (unless `no-save-state` is set) and are deduplicated — Watchman waits for the filesystem to settle before batching changed files and invoking the command, and only one instance of a trigger process runs at a time.
+
+## Syntax
+
+**Simple syntax (CLI)**
+
+```bash
+watchman -- trigger <root> <triggername> [patterns] -- <command>
+```
+
+The first `--` separates Watchman CLI flags from trigger arguments. The second `--` separates glob patterns from the command to run.
+
+**Extended syntax (JSON)**
+
+```json
+["trigger", "<root>", {
+  "name": "<triggername>",
+  "expression": ["pcre", "\\.js$"],
+  "command": ["make"]
+}]
+```
+
+## Trigger object fields
+
+<ParamField body="name" type="string" required>
+  The name of the trigger. Registering a new trigger with an existing name replaces the old one and re-evaluates the expression against the full tree.
+</ParamField>
+
+<ParamField body="command" type="string[]" required>
+  The argv array of the command to invoke. Watchman uses its own `$PATH` to locate the executable. For commands in non-standard locations, use the full path.
+</ParamField>
+
+<ParamField body="expression" type="array">
+  A [query expression](/guides/file-queries) applied to the list of changed files. Only files that match will be passed to the command. Omitting this field matches all changed files.
+</ParamField>
+
+<ParamField body="append_files" type="boolean" default="false">
+  When `true`, matching file names are appended to the `command` array when the trigger fires. If the file list exceeds system argument size limits, Watchman truncates it and sets `WATCHMAN_FILES_OVERFLOW=true` in the environment.
+</ParamField>
+
+<ParamField body="stdin" type="string | string[]" default='"/dev/null"'>
+  Controls what is written to the command's stdin. Accepted values:
+
+  - `"/dev/null"` — stdin reads from `/dev/null` (default).
+  - An array of field names (e.g., `["name", "size"]`) — Watchman writes a JSON array of objects with those fields to stdin. If the array contains a single field, the output is a flat JSON array of values instead of objects.
+  - `"NAME_PER_LINE"` — one file name per line, unquoted. Use this with `xargs(1)` to handle large file lists.
+</ParamField>
+
+<ParamField body="stdout" type="string">
+  Redirect stdout for the triggered command. Paths are relative to the watched root.
+
+  - `>path/to/file` — truncate-and-write.
+  - `>>path/to/file` — append (not supported on Windows).
+
+  If omitted, output goes to the Watchman log file.
+</ParamField>
+
+<ParamField body="stderr" type="string">
+  Redirect stderr for the triggered command. Same format as `stdout`. If omitted, stderr goes to the Watchman log file.
+</ParamField>
+
+<ParamField body="max_files_stdin" type="number">
+  Maximum number of files written to stdin. When the matched file count exceeds this limit, the list is truncated and `WATCHMAN_FILES_OVERFLOW=true` is set in the environment. Default is no limit.
+</ParamField>
+
+<ParamField body="chdir" type="string">
+  Working directory for the spawned process, relative to the watched root. Defaults to the watched root. Note that file names in the query results are always relative to the watched root regardless of `chdir`; the root path is available via `$WATCHMAN_ROOT`.
+</ParamField>
+
+<ParamField body="relative_root" type="string">
+  Evaluate the trigger relative to this subdirectory within the watched root. File names are still relative to the watched root, but the expression is scoped to the subtree. Available since Watchman 3.4.
+</ParamField>
+
+## Environment variables
+
+Watchman sets the following environment variables for every triggered command:
+
+| Variable | Description |
+|---|---|
+| `WATCHMAN_ROOT` | Absolute path to the watched root. |
+| `WATCHMAN_TRIGGER` | Name of the trigger that fired. |
+| `WATCHMAN_CLOCK` | Clock value at the time of invocation. |
+| `WATCHMAN_SINCE` | Clock value from the previous invocation, or unset on the first run. |
+| `WATCHMAN_SOCK` | Path to the Watchman socket. |
+| `WATCHMAN_FILES_OVERFLOW` | Set to `true` when the file list was truncated. |
+| `WATCHMAN_RELATIVE_ROOT` | Full path of the relative root, when `relative_root` is set. |
+
+## Examples
+
+**Run `make` when JS, CSS, or C++ files change**
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/root", {
+  "name": "assets",
+  "expression": ["pcre", "\\.(js|css|c|cpp)$"],
+  "command": ["make"]
+}]
+EOT
+```
+
+**Run a build script and pass changed file names as arguments**
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/root", {
+  "name": "rebuild",
+  "expression": ["suffix", "ts"],
+  "command": ["./scripts/build.sh"],
+  "append_files": true
+}]
+EOT
+```
+
+**Pass changed file metadata via stdin (JSON)**
+
+```bash
+watchman -j <<-EOT
+["trigger", "/path/to/root", {
+  "name": "watcher",
+  "expression": ["type", "f"],
+  "command": ["./process-changes.py"],
+  "stdin": ["name", "size", "exists"]
+}]
+EOT
+```
+
+**Simple CLI syntax — run `ls -l` on changed `.js` files**
+
+```bash
+watchman -- trigger ~/www jsfiles '*.js' -- ls -l
+```
+
+<Warning>
+  Triggered processes are spawned by the Watchman server daemon and do not have access to your terminal. Output goes to the Watchman log file unless `stdout`/`stderr` are configured.
+</Warning>
+
+<Note>
+  Watchman only runs one instance of a trigger process at a time. If files change while the command is running, Watchman queues the next invocation and fires it once the current process exits.
+</Note>

@@ -1,0 +1,108 @@
+---
+title: "state-leave — vacate a named state on a watched root"
+description: "Release a named state previously asserted with state-enter, flushing deferred subscription notifications or discarding dropped ones from the window."
+---
+
+The `state-leave` command removes a named state that was previously asserted with [`state-enter`](/commands/state-enter). When a state is vacated, Watchman notifies all subscribers and resolves any pending `defer` or `drop` behavior: deferred subscriptions flush the file notifications buffered during the state window, while subscriptions configured to `drop` discard those notifications and advance their cursor to the current clock. Available since Watchman 4.4.
+
+## Syntax
+
+```json
+["state-leave", "<root>", "<statename>"]
+```
+
+With metadata:
+
+```json
+["state-leave", "<root>", {
+  "name": "<statename>",
+  "metadata": <any JSON value>
+}]
+```
+
+## Parameters
+
+<ParamField body="name" type="string" required>
+  The name of the state to vacate. Must match the name used in the corresponding `state-enter` call.
+</ParamField>
+
+<ParamField body="metadata" type="any">
+  Optional arbitrary JSON value forwarded verbatim to subscribers via the unilateral state-leave notification. Watchman does not interpret this value.
+</ParamField>
+
+<ParamField body="sync_timeout" type="number" default="60000">
+  Timeout in milliseconds for filesystem synchronization before the state is vacated. If the synchronization cookie is not observed within this window, the command returns an error and the state is not vacated. Set to `0` to disable synchronization.
+</ParamField>
+
+## Behavior when the state is vacated
+
+When `state-leave` is issued, Watchman sends a unilateral notification to all active subscribers:
+
+```json
+{
+  "subscription": "mysubscriptionname",
+  "root":         "/path/to/root",
+  "state-leave":  "mystate",
+  "clock":        "c:1446410081:18462:7:135"
+}
+```
+
+After this notification:
+
+- **Deferred subscriptions** (`defer` field): The buffered file notifications accumulated since `state-enter` are delivered in a single flush.
+- **Dropped subscriptions** (`drop` field): The cursor is advanced to the `state-leave` clock, effectively discarding all file notifications generated during the state window.
+
+The `clock` values from the `state-enter` and `state-leave` notifications can be used together as bounds in `since` queries to precisely identify files that changed during the operation.
+
+## Examples
+
+**Signal the end of a VCS update**
+
+```json
+["state-leave", "/path/to/root", "hg.update"]
+```
+
+**Signal the end of a VCS update with result metadata**
+
+```json
+["state-leave", "/path/to/root", {
+  "name": "hg.update",
+  "metadata": {
+    "rev": "def456",
+    "conflicts": 0
+  }
+}]
+```
+
+**Specify a longer sync timeout for a large repository**
+
+```json
+["state-leave", "/path/to/root", {
+  "name": "hg.update",
+  "sync_timeout": 120000
+}]
+```
+
+## Abandoned states
+
+If the client session that entered a state disconnects without calling `state-leave`, Watchman automatically vacates the state. Subscribers receive the same unilateral notification but with an additional `"abandoned": true` field:
+
+```json
+{
+  "subscription": "mysubscriptionname",
+  "root":         "/path/to/root",
+  "state-leave":  "mystate",
+  "clock":        "c:1446410081:18462:7:137",
+  "abandoned":    true
+}
+```
+
+This allows subscribers to distinguish a clean state exit from an unexpected one and take appropriate action.
+
+## Synchronization
+
+Like `state-enter`, `state-leave` performs filesystem query synchronization before vacating the state. This ensures the clock in the notification is consistent with the filesystem so that subscribers can accurately bound queries using the enter and leave clocks.
+
+<Warning>
+  Only the client session that called `state-enter` can call `state-leave` for that state. Attempting to vacate a state from a different session will fail.
+</Warning>

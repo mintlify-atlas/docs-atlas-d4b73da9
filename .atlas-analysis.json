@@ -1,22 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Watchman",
+  "projectType": "cli-tool",
+  "projectName": "Watchman",
+  "projectDescription": "A file watching service that monitors files for changes and triggers actions or notifications when they occur.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#232323"
-  },
-  "favicon": "https://media.brand.dev/75298273-8809-4246-b7c6-622e686ca474.svg",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/facebook/watchman"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/facebook/watchman"
-    }
-  },
+  "primaryColor": "#232323",
+  "lightColor": null,
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -101,10 +90,7 @@
               "commands/clock",
               "commands/get-sockname",
               "commands/shutdown-server",
-              "commands/log",
-              "commands/flush-subscriptions",
-              "commands/get-config",
-              "commands/list-capabilities"
+              "commands/log"
             ]
           },
           {
@@ -120,5 +106,36 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Real-time file system change monitoring using OS-native events (inotify, FSEvents, kqueue)",
+    "Flexible query system with generators (since, suffix, glob, path, all) and expression filters",
+    "Persistent subscriptions that push file change notifications to connected clients",
+    "Trigger system to execute commands automatically when matching files change",
+    "Source control aware queries that minimize noise during large rebases or merges",
+    "Multi-language client libraries (Node.js, Python, C++, Java, Ruby, Rust)",
+    "JSON/BSER socket protocol for efficient IPC communication",
+    "Named cursors and clock IDs for race-free incremental file change tracking"
+  ],
+  "publicApiSurface": [
+    "watchman watch-project <path>",
+    "watchman watch <path>",
+    "watchman query <path> <query-object>",
+    "watchman since <path> <clockspec> [patterns]",
+    "watchman find <path> [patterns]",
+    "watchman subscribe <path> <name> <query>",
+    "watchman unsubscribe <path> <name>",
+    "watchman trigger <path> <name> [patterns] -- <command>",
+    "watchman trigger-list <path>",
+    "watchman trigger-del <path> <name>",
+    "watchman clock <path>",
+    "watchman version",
+    "watchman get-sockname",
+    "watchman shutdown-server",
+    "watchman state-enter <path> <name>",
+    "watchman state-leave <path> <name>",
+    "npm package: fb-watchman",
+    "PyPI package: pywatchman",
+    "C++ client: watchman/WatchmanClient.h"
+  ]
 }

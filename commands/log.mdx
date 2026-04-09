@@ -1,0 +1,140 @@
+---
+title: "log and log-level — control Watchman server logging"
+description: "Inject a message into the Watchman server log and control log verbosity per client session to receive live log PDUs over your connection."
+---
+
+Watchman provides two related commands for working with server-side logging: `log` injects a message into the server log file, and `log-level` controls how many of those log events are forwarded to your client connection as unilateral PDUs.
+
+## log — inject a message into the server log
+
+### Syntax
+
+```bash
+watchman log <level> <message>
+```
+
+JSON form:
+
+```json
+["log", "debug", "my diagnostic message"]
+```
+
+### Parameters
+
+<ParamField path="level" type="string" required>
+  The severity level at which to write the message. Must be `debug` or `error`. The message is written to the server log file only if the server's own log level is at or above this value.
+</ParamField>
+
+<ParamField path="message" type="string" required>
+  The text to write into the server log.
+</ParamField>
+
+### Example
+
+```bash
+$ watchman log debug "log this please"
+{
+  "version": "6.0.0"
+}
+```
+
+The message appears in the Watchman log file (typically `~/.watchman.log`) and is also broadcast to any connected clients whose log level is set to receive it.
+
+---
+
+## log-level — set log verbosity for your session
+
+### Syntax
+
+```bash
+watchman --server-encoding=json --persistent log-level <level>
+```
+
+JSON form:
+
+```json
+["log-level", "debug"]
+```
+
+### Parameters
+
+<ParamField path="level" type="string" required>
+  The minimum severity of log events to forward to this client session.
+
+  | Value | Numeric | Description |
+  |-------|---------|-------------|
+  | `off` | 0 | No log events are forwarded (default for new connections). |
+  | `error` | 1 | Only important log events are forwarded. |
+  | `debug` | 2 | All log events are forwarded. |
+</ParamField>
+
+### Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="log_level" type="string" required>
+  The log level now in effect for this client session.
+</ResponseField>
+
+### Example
+
+```bash
+$ watchman --server-encoding=json --persistent log-level debug
+{
+  "version": "6.0.0",
+  "log_level": "debug"
+}
+```
+
+---
+
+## Receiving log PDUs as a client
+
+Once you call `log-level` with `debug` or `error`, the server forwards matching log events to your connection as unilateral PDUs — messages sent without a corresponding request. Each PDU has the following structure:
+
+```json
+{
+  "version": "1.0",
+  "log": "the log message text"
+}
+```
+
+<Warning>
+You cannot use this mechanism to capture the output of triggered processes. Trigger output goes to the trigger's own stdout/stderr, not to the Watchman log.
+</Warning>
+
+### Node.js log subscription example
+
+```javascript Node.js
+var watchman = require('fb-watchman');
+var client = new watchman.Client();
+
+// Request all log events (very verbose — use 'error' in production)
+client.command(['log-level', 'debug'], function (error) {
+  if (error) {
+    console.error('Failed to set log level:', error);
+    return;
+  }
+  console.log('Log level set to debug');
+});
+
+// The 'log' event is emitted for each unilateral log PDU
+client.on('log', function (info) {
+  // info: { version: '6.0.0', log: 'the message' }
+  process.stdout.write('[watchman] ' + info.log);
+});
+```
+
+To silence log forwarding, set the level back to `off`:
+
+```javascript
+client.command(['log-level', 'off']);
+```
+
+## Notes
+
+- `log-level` affects only the current client connection. Other connected clients retain their own log level settings.
+- The server always writes to its own log file regardless of any client log level.
+- The `--persistent` flag on the CLI keeps the connection open so that subsequent log PDUs can be received. Without it, the CLI exits after the command response and no PDUs are delivered.

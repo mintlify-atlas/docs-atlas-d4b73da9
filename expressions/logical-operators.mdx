@@ -1,0 +1,107 @@
+---
+title: "Logical operators in Watchman queries: allof, anyof"
+description: "Reference for Watchman's allof, anyof, not, true, and false expression terms for combining and inverting filter conditions in file queries."
+---
+
+Watchman's logical operator terms let you compose simple expression terms into arbitrarily complex filters. You can require that all conditions hold (`allof`), that at least one holds (`anyof`), or invert any condition (`not`). The `true` and `false` constants serve as useful building blocks when constructing or debugging expressions.
+
+## allof
+
+`allof` evaluates to true when **all** of its sub-expressions evaluate to true. Sub-expression evaluation stops at the first false result (short-circuit AND):
+
+```json
+["allof", expr1, expr2, "...exprN"]
+```
+
+Match `.txt` files that are not empty:
+
+```json
+["allof", ["match", "*.txt"], ["not", "empty"]]
+```
+
+## anyof
+
+`anyof` evaluates to true when **at least one** of its sub-expressions evaluates to true. Sub-expression evaluation stops at the first true result (short-circuit OR):
+
+```json
+["anyof", expr1, expr2, "...exprN"]
+```
+
+Match files with a `.txt` or `.md` extension:
+
+```json
+["anyof", ["match", "*.txt"], ["match", "*.md"]]
+```
+
+<Tip>
+When matching multiple file suffixes or names, prefer the set forms `["suffix", ["txt", "md"]]` and `["name", ["a", "b"]]` over `anyof`. The set forms use an accelerated internal lookup and run faster.
+</Tip>
+
+## not
+
+`not` inverts the result of its single sub-expression argument:
+
+```json
+["not", expr]
+```
+
+Match files that are not empty:
+
+```json
+["not", "empty"]
+```
+
+## true
+
+`true` always evaluates to true regardless of the file being tested. Both forms are equivalent:
+
+```json
+"true"
+["true"]
+```
+
+Using `true` as the top-level expression returns every file the generator produces, with no additional filtering.
+
+## false
+
+`false` always evaluates to false regardless of the file being tested. Both forms are equivalent:
+
+```json
+"false"
+["false"]
+```
+
+## Combining operators
+
+Operators nest freely, allowing you to express precise conditions. Parentheses are represented by nesting arrays.
+
+Match `.js` or `.ts` files that are neither empty nor deleted, but exclude anything under `node_modules/`:
+
+```json
+["allof",
+  ["suffix", ["js", "ts"]],
+  "exists",
+  ["not", "empty"],
+  ["not", ["dirname", "node_modules"]]
+]
+```
+
+### Real-world example: non-empty PHP files that exist
+
+The following expression is useful when you want to act on PHP source files that are present and contain content — skipping deleted or zero-byte files:
+
+```json
+["allof",
+  ["suffix", "php"],
+  "exists",
+  ["not", "empty"]
+]
+```
+
+Breaking it down:
+
+- `["suffix", "php"]` — the file extension must be `php` (case-insensitive).
+- `"exists"` — the file must not have been deleted.
+- `["not", "empty"]` — the file must contain at least one byte.
+
+All three conditions must hold because they are wrapped in `allof`.

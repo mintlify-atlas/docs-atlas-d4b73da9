@@ -1,0 +1,119 @@
+---
+title: "clock — get the current clock value for a watched root"
+description: "Return the current abstract clock value for a watched root, useful for establishing a time baseline before subscribing to only future file changes."
+---
+
+The `clock` command returns the current [clock value](/guides/clockspec) for a watched root. You use this value as a `since` constraint in subsequent queries or subscriptions so that only changes that occur _after_ the clock call are reported — not the full existing file tree.
+
+## Syntax
+
+```bash
+watchman clock <path>
+```
+
+JSON form (the third argument is optional):
+
+```json
+["clock", "/path/to/dir"]
+```
+
+```json
+["clock", "/path/to/dir", {"sync_timeout": 100}]
+```
+
+## Parameters
+
+<ParamField path="path" type="string" required>
+  Absolute path to the watched root. The root must already be registered with [`watch-project`](/commands/watch-project).
+</ParamField>
+
+<ParamField body="sync_timeout" type="number">
+  _Since 3.9. Capability: `clock-sync-timeout`._
+
+  Maximum number of milliseconds to wait for a synchronization cookie to be observed. When provided, Watchman creates a cookie file at the start of the call and waits until the kernel notifies it that the cookie was seen. The returned clock is then guaranteed to reflect all filesystem events up to at least the moment the command was issued.
+
+  Without `sync_timeout`, the returned clock is the instantaneous value at the time of the call and may lag behind any pending kernel notifications.
+</ParamField>
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="clock" type="string" required>
+  The current clock value for the root, for example `c:1704067200:12345:1:0`. Use this value as the `since` field in queries and subscriptions.
+</ResponseField>
+
+## Example
+
+### CLI
+
+```bash
+$ watchman clock /path/to/dir
+{
+  "version": "3.9.0",
+  "clock": "c:1704067200:12345:1:0"
+}
+```
+
+### JSON with sync_timeout
+
+```bash
+$ watchman -j <<< '["clock", "/path/to/dir", {"sync_timeout": 100}]'
+{
+  "version": "3.9.0",
+  "clock": "c:1704067200:12345:1:1"
+}
+```
+
+## Subscribing to only future changes
+
+By default, a new subscription delivers results for all files that already exist in the tree. If your application only cares about changes that happen _after_ it starts, capture the clock before subscribing and pass it as the `since` constraint.
+
+```javascript Node.js
+var watchman = require('fb-watchman');
+var client = new watchman.Client();
+
+function subscribeToFutureChanges(watch, relativePath) {
+  // 1. Capture the current clock for this root
+  client.command(['clock', watch], function (error, resp) {
+    if (error) {
+      console.error('Failed to query clock:', error);
+      return;
+    }
+
+    var sub = {
+      expression: ['allof', ['match', '*.js']],
+      fields: ['name', 'size', 'exists', 'type'],
+      // Only report changes that occur after this clock value
+      since: resp.clock
+    };
+
+    if (relativePath) {
+      sub.relative_root = relativePath;
+    }
+
+    // 2. Subscribe with the clock as a lower bound
+    client.command(['subscribe', watch, 'mysubscription', sub],
+      function (error, resp) {
+        if (error) {
+          console.error('failed to subscribe:', error);
+          return;
+        }
+        console.log('subscription established:', resp.subscribe);
+      }
+    );
+  });
+}
+```
+
+<Tip>
+Using `clock` before subscribing is the standard pattern for applications such as build systems and test runners that should react only to new edits, not replay the entire file tree on startup.
+</Tip>
+
+## Notes
+
+- The root must already be watched. Call [`watch-project`](/commands/watch-project) first.
+- Clock values are opaque strings. Do not parse their contents; treat them as cursors.
+- For background on how clocks compare to unix timestamps and named cursors, see [Clockspec](/guides/clockspec).

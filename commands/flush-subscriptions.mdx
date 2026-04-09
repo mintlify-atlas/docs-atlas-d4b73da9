@@ -1,0 +1,97 @@
+---
+title: "flush-subscriptions — force pending updates to deliver"
+description: "Flush buffered subscription updates for a watched root on the current session, guaranteeing subscriptions are current before reading their state."
+---
+
+The `flush-subscriptions` command forces all buffered subscription updates associated with the current session to be delivered immediately, without waiting for the filesystem settle period to expire. This guarantees that subscriptions are up-to-date as of the moment the command was received by Watchman. Available since Watchman **4.8**.
+
+## Syntax
+
+```bash
+["flush-subscriptions", "/path/to/root", {
+  "sync_timeout": 1000
+}]
+```
+
+This command is used over the socket interface (not typically via the CLI). It is designed for interactive programs that maintain a background process or daemon with an active subscription, where a foreground command needs to ensure the subscription is fully current before reading its results.
+
+## Parameters
+
+<ParamField body="sync_timeout" type="integer" required>
+  Milliseconds to wait for Watchman to observe a synchronization cookie. The cookie is written at the start of `flush-subscriptions`. Once Watchman observes the cookie, it has received all OS-level change events up to at least that point in time.
+</ParamField>
+
+<ParamField body="subscriptions" type="string[]">
+  Which named subscriptions to flush. If omitted, all subscriptions on the current session associated with the given root are flushed. A single session can have subscriptions to multiple roots, but `flush-subscriptions` can only flush one root at a time.
+</ParamField>
+
+## Response fields
+
+<ResponseField name="clock" type="string" required>
+  The clock value as of the flush operation.
+</ResponseField>
+
+<ResponseField name="synced" type="string[]" required>
+  Names of subscriptions that were successfully synced and had pending updates delivered.
+</ResponseField>
+
+<ResponseField name="no_sync_needed" type="string[]" required>
+  Names of subscriptions that were already up-to-date — no updates needed to be flushed.
+</ResponseField>
+
+<ResponseField name="dropped" type="string[]" required>
+  Names of subscriptions that are currently in a `drop` state. Their updates were not delivered.
+</ResponseField>
+
+## Examples
+
+### Flush all subscriptions for a root
+
+Assuming three subscriptions `sub1`, `sub2`, and `sub3` are established on the session, where `sub1` has pending updates, `sub2` is current, and `sub3` is actively dropping updates:
+
+```json
+["flush-subscriptions", "/path/to/root", {"sync_timeout": 1000}]
+```
+
+Watchman first emits the pending subscription PDU for `sub1` as a unilateral message, then responds:
+
+```json
+{
+  "clock": "c:1446410081:18462:7:135",
+  "synced": ["sub1"],
+  "no_sync_needed": ["sub2"],
+  "dropped": ["sub3"]
+}
+```
+
+### Flush only specific subscriptions
+
+```json
+["flush-subscriptions", "/path/to/root", {
+  "sync_timeout": 1000,
+  "subscriptions": ["sub1", "sub2"]
+}]
+```
+
+## Behavior with deferred and dropped subscriptions
+
+- **Deferred subscriptions** (using `defer` or `defer_vcs`): `flush-subscriptions` forces delivery immediately, without waiting for the deferred state to end.
+- **Dropped subscriptions** (using `drop`): updates are not delivered. The subscription name appears in the `dropped` response field.
+- **Already current**: subscriptions with no pending updates appear in `no_sync_needed` and no unilateral PDU is emitted for them.
+
+<Note>
+  Subscription updates are interleaved between the `flush-subscriptions` request and its response. Once the response is received, all listed subscriptions are guaranteed to be current as of the flush time.
+</Note>
+
+## Use case
+
+The typical pattern is for an interactive command-line tool that forwards requests to a background daemon. The daemon maintains a Watchman subscription and calls `flush-subscriptions` before reading the subscription state, eliminating race conditions with files that changed right before the interactive command ran.
+
+```
+User runs: my-tool rebuild
+  → Interactive tool signals daemon
+  → Daemon calls flush-subscriptions
+  → Daemon receives pending subscription updates
+  → Daemon processes the now-current file set
+  → Tool reports results
+```

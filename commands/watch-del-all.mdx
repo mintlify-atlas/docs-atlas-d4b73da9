@@ -1,0 +1,66 @@
+---
+title: "watch-del-all — remove all active Watchman watches"
+description: "Remove every active watch root and all associated triggers and subscriptions in a single command, clearing Watchman state before shutdown or a fresh start."
+---
+
+`watch-del-all` removes every directory root currently registered with the Watchman server in one operation. All triggers and subscriptions attached to those watches are cancelled at the same time. It is the bulk equivalent of calling [`watch-del`](/commands/watch-del) for each entry returned by [`watch-list`](/commands/watch-list). This command is available since Watchman **3.1.1**.
+
+## Syntax
+
+```bash
+watchman watch-del-all
+```
+
+## Parameters
+
+This command takes no parameters.
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="roots" type="string[]" required>
+  Array of absolute paths for every watch root that was removed.
+</ResponseField>
+
+## Examples
+
+### CLI
+
+```bash
+watchman watch-del-all
+```
+
+### JSON protocol
+
+```json
+["watch-del-all"]
+```
+
+## What gets removed
+
+`watch-del-all` removes, for every registered watch:
+
+- The kernel change-notification subscription for the directory and all its subdirectories.
+- All triggers registered against each watch root.
+- All active subscriptions against each watch root.
+- All watch entries from the Watchman state file (so none are restored on restart).
+
+## Use cases
+
+- **Clean shutdown**: clear all watches before stopping a development environment so the Watchman service starts fresh next time.
+- **Resetting state**: discard stale or incorrect watches accumulated during development or testing without restarting the Watchman service.
+- **Tooling scripts**: reset the watch set to a known-empty baseline before programmatically registering exactly the set of directories a tool requires.
+
+## Persistence and --no-save-state
+
+<Warning>
+  If the Watchman service was started with `--no-save-state`, this command removes all watches from the running process but does not modify the state file. Any watches recorded in the state file will be re-established when the service next restarts.
+</Warning>
+
+## Notes
+
+- Running this command when no watches are active returns an empty `roots` array and is not an error.
+- Available since Watchman 3.1.1. For earlier versions, iterate over `watch-list` output and call `watch-del` for each entry.

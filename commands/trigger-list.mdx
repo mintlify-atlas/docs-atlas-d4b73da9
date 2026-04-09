@@ -1,0 +1,62 @@
+---
+title: "trigger-list — list all registered triggers for a root"
+description: "Return all trigger objects currently registered against a watched root, including each trigger's name, expression, command, and I/O settings."
+---
+
+The `trigger-list` command returns all triggers that have been registered against a given watched root. Each entry in the response is a full trigger object in the extended format introduced in Watchman 2.9.7, giving you a complete view of the name, expression, command, and I/O configuration for every active trigger.
+
+## Syntax
+
+```bash
+watchman trigger-list <root>
+```
+
+**JSON protocol**
+
+```json
+["trigger-list", "<root>"]
+```
+
+## Example
+
+```bash
+watchman trigger-list /path/to/root
+```
+
+**Response**
+
+```json
+{
+  "version": "2.9.7",
+  "triggers": [
+    {
+      "name": "assets",
+      "command": ["make"],
+      "expression": ["pcre", "\\.(js|css|c|cpp)$"],
+      "append_files": false,
+      "stdin": "/dev/null",
+      "stdout": null,
+      "stderr": null,
+      "max_files_stdin": 0
+    },
+    {
+      "name": "jsfiles",
+      "command": ["ls", "-l"],
+      "expression": ["match", "*.js", "wholename"],
+      "append_files": true,
+      "stdin": ["name", "exists", "new", "size", "mode"],
+      "stdout": null,
+      "stderr": null,
+      "max_files_stdin": 0
+    }
+  ]
+}
+```
+
+## Use case
+
+`trigger-list` is useful when you want to audit which triggers are active on a root — for example, to verify a trigger was registered correctly, to inspect its expression before removing it, or to debug why a command is or is not firing on file changes. The output format matches the extended trigger object accepted by the [`trigger`](/commands/trigger) command, so you can capture and replay or modify existing trigger configurations.
+
+<Note>
+  The output format changed in Watchman 2.9.7. Earlier versions returned a different structure. If you are running an older Watchman, the response may not include all fields shown above.
+</Note>

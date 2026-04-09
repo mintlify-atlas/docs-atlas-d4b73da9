@@ -1,0 +1,199 @@
+---
+title: "Name, glob, and regex matching in Watchman queries"
+description: "Reference for Watchman's match, name, pcre, suffix, and dirname expression terms for filtering files by name, glob, regex, extension, or directory."
+---
+
+Watchman provides several expression terms for matching files by name or path. You can use shell-style glob patterns, exact names, Perl Compatible Regular Expressions, file suffixes, or parent directory paths. Each term can operate on either the file's basename or its full path relative to the watch root (wholename).
+
+<Tabs>
+
+<Tab title="match">
+
+## match and imatch
+
+The `match` expression performs a glob-style match against the file's basename by default. It evaluates to true when the pattern matches:
+
+```json
+["match", "*.txt"]
+```
+
+Pass `"basename"` or `"wholename"` as the third argument to control the match scope:
+
+```json
+["match", "*.txt", "basename"]
+["match", "dir/*.txt", "wholename"]
+```
+
+### Case sensitivity
+
+`match` is case-sensitive. Use `imatch` for case-insensitive matching — it is otherwise identical:
+
+```json
+["imatch", "*.TXT"]
+```
+
+On filesystems that are themselves case-insensitive (common on macOS and Windows), `match` and `imatch` behave the same. Since version 4.7 you can also override case sensitivity for the entire query with the `case_sensitive` field.
+
+### Recursive glob with wildmatch
+
+_Since version 3.7._ The `wildmatch` capability adds support for the `**` operator, which matches across directory separators. Use it with `"wholename"` to recursively match files in a subtree:
+
+```json
+["match", "src/**/*.java", "wholename"]
+```
+
+#### Wildmatch flags
+
+Pass a flags object as the optional fourth argument to adjust matching behavior:
+
+```json
+["match", "*.txt", "basename", {"includedotfiles": true}]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `includedotfiles` | `false` | Include files whose names begin with `.` |
+| `noescape` | `false` | Treat backslashes as literal characters rather than escape sequences |
+
+```json
+["match", "*\\*.txt", "basename", {"noescape": true}]
+```
+
+The expression above matches filenames like `a\b.txt`.
+
+</Tab>
+
+<Tab title="name">
+
+## name and iname
+
+The `name` expression performs an exact filename match. By default it matches against the basename:
+
+```json
+["name", "Makefile"]
+```
+
+Pass an array as the second argument to match any one of several names. This form is accelerated internally and is preferred over an equivalent `anyof` construction:
+
+```json
+["name", ["foo.txt", "Makefile"]]
+```
+
+Use the optional third argument to match against the wholename instead:
+
+```json
+["name", "path/to/file.txt", "wholename"]
+["name", ["path/to/one", "path/to/two"], "wholename"]
+```
+
+### Case sensitivity
+
+`iname` is the case-insensitive variant of `name`. On macOS with a case-insensitive filesystem, `name` and `iname` are equivalent (since version 2.9.9). Since version 4.7 you can also control case sensitivity globally for a query using the `case_sensitive` field.
+
+</Tab>
+
+<Tab title="pcre">
+
+## pcre and ipcre
+
+<Warning>
+`pcre` requires that Watchman was compiled with `--with-pcre`. Check the `pcre` capability before using this term.
+</Warning>
+
+The `pcre` expression matches the basename of the file against a Perl Compatible Regular Expression. The following expression matches `test_plan.php` but not `mytest_plan`:
+
+```json
+["pcre", "^test_"]
+```
+
+Pass `"basename"` or `"wholename"` as the third argument to change the match scope:
+
+```json
+["pcre", "txt", "basename"]
+["pcre", "txt", "wholename"]
+```
+
+### Case sensitivity
+
+`pcre` is case-sensitive. Use `ipcre` for case-insensitive matching:
+
+```json
+["ipcre", "^test_"]
+```
+
+On macOS with a case-insensitive filesystem, `pcre` and `ipcre` are equivalent (since version 2.9.9). Since version 4.7 you can override case sensitivity for the whole query with the `case_sensitive` field.
+
+</Tab>
+
+<Tab title="suffix">
+
+## suffix
+
+The `suffix` expression evaluates to true when the file's extension matches the given string. Matching is always case-insensitive, so `"php"` also matches `FOO.PHP`:
+
+```json
+["suffix", "php"]
+```
+
+### Matching multiple suffixes (suffix-set)
+
+_Since version 5.0._ Pass an array to match any one of several extensions. This form is accelerated and preferred over an `anyof` chain:
+
+```json
+["suffix", ["php", "css", "html"]]
+```
+
+The following two expressions are functionally equivalent, but the set form runs faster:
+
+```json
+["anyof", ["suffix", "php"], ["suffix", "html"]]
+["suffix", ["php", "html"]]
+```
+
+The associated capability name is `suffix-set`. Check for this capability before using array syntax if you need to support older Watchman versions.
+
+</Tab>
+
+<Tab title="dirname">
+
+## dirname and idirname
+
+_Since version 3.1._
+
+The `dirname` expression matches files whose parent directory path (relative to the watch root) equals or is a descendant of the given path. Given a file with wholename `foo/bar/baz`, its dirname is `foo/bar`.
+
+The simplest form matches files directly inside `foo/bar` and any of its subdirectories:
+
+```json
+["dirname", "foo/bar"]
+```
+
+This is a shortcut for the explicit depth form using `["depth", "ge", 0]`:
+
+```json
+["dirname", "foo/bar", ["depth", "ge", 0]]
+```
+
+### Depth filtering
+
+A file's depth is `0` when it is directly inside the specified dirname, `1` when it is inside a direct child directory, and so on. The depth relational expression accepts the same operators as the [`size`](/expressions/type-size) term (`eq`, `ne`, `gt`, `ge`, `lt`, `le`).
+
+Match only files directly inside `foo/bar` (depth 0):
+
+```json
+["dirname", "foo/bar", ["depth", "eq", 0]]
+```
+
+Match only files two or more levels deep:
+
+```json
+["dirname", "foo/bar", ["depth", "ge", 2]]
+```
+
+### Case sensitivity
+
+`idirname` is the case-insensitive variant of `dirname`. On a case-insensitive filesystem, `dirname` and `idirname` are equivalent.
+
+</Tab>
+
+</Tabs>

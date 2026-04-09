@@ -1,0 +1,76 @@
+---
+title: "get-config — retrieve active watchmanconfig settings"
+description: "Retrieve the parsed .watchmanconfig JSON for a watched root, showing all per-root configuration options currently in effect for that directory."
+---
+
+The `get-config` command returns the parsed contents of the `.watchmanconfig` file for a watched root. If no `.watchmanconfig` file is present in the root, it returns an empty configuration object. This is useful for inspecting which per-root configuration options are active without reading the file directly.
+
+## Syntax
+
+```bash
+watchman get-config <path>
+```
+
+## Parameters
+
+<ParamField path="path" type="string" required>
+  Absolute path to the watched root whose configuration you want to retrieve. The path must already be registered as a watch root.
+</ParamField>
+
+## Response fields
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version.
+</ResponseField>
+
+<ResponseField name="config" type="object" required>
+  The parsed `.watchmanconfig` contents as a JSON object. Returns `{}` if no `.watchmanconfig` file exists in the root.
+</ResponseField>
+
+## Examples
+
+### Root with no .watchmanconfig
+
+```bash
+watchman get-config .
+```
+
+```json
+{
+  "version": "2.9.9",
+  "config": {}
+}
+```
+
+### Root with a .watchmanconfig
+
+```bash
+watchman get-config /path/to/root
+```
+
+```json
+{
+  "version": "2.9.9",
+  "config": {
+    "ignore_dirs": [
+      "buck-out"
+    ]
+  }
+}
+```
+
+### JSON protocol
+
+```json
+["get-config", "/path/to/root"]
+```
+
+## Notes
+
+<Warning>
+  Watchman reads `.watchmanconfig` only when a watch is established. If you modify `.watchmanconfig` after the watch was created, `get-config` will still return the original values. To pick up changes, remove and re-add the watch using [`watch-del`](/commands/watch-del) followed by [`watch-project`](/commands/watch-project).
+</Warning>
+
+- `get-config` returns the raw values from the file and does not validate them against the list of known options. Fields not recognized by Watchman may appear in the output.
+- For a reference of all valid configuration options, see the [configuration guide](/configuration).
+- Available since Watchman **2.9.9**.

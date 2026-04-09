@@ -1,0 +1,84 @@
+---
+title: "unsubscribe — cancel a named Watchman subscription"
+description: "Explicitly cancel a named Watchman subscription so the server stops delivering change notifications for it on the current connection."
+---
+
+The `unsubscribe` command cancels a named subscription on a watched root. Once unsubscribed, the server stops generating file change notification packets for that subscription name on the current connection. You do not need to call `unsubscribe` when closing a connection — Watchman automatically removes all subscriptions when the connection that created them closes.
+
+_Available since version 1.6._
+
+## Syntax
+
+```bash
+watchman unsubscribe <path> <name>
+```
+
+The JSON protocol form is:
+
+```json
+["unsubscribe", "/path/to/root", "mysubscriptionname"]
+```
+
+## Parameters
+
+<ParamField path="path" type="string" required>
+  Absolute path to the watched root the subscription is registered against.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  The subscription name as specified when calling [`subscribe`](/commands/subscribe).
+</ParamField>
+
+## Response
+
+```json
+{
+  "version": "1.6",
+  "unsubscribe": "mysubscriptionname"
+}
+```
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version string.
+</ResponseField>
+
+<ResponseField name="unsubscribe" type="string" required>
+  The name of the subscription that was cancelled, confirming the operation succeeded.
+</ResponseField>
+
+## Example
+
+Subscribe to PHP file changes, then cancel the subscription:
+
+```bash
+# 1. Create the subscription
+watchman -j --server-encoding=json -p <<-EOT
+["subscribe", "/path/to/root", "php-watcher", {
+  "expression": ["suffix", "php"],
+  "fields": ["name"]
+}]
+EOT
+
+# 2. ... receive notifications ...
+
+# 3. Cancel the subscription
+watchman -j <<< '["unsubscribe", "/path/to/root", "php-watcher"]'
+```
+
+```json
+{
+  "version": "1.6",
+  "unsubscribe": "php-watcher"
+}
+```
+
+<Note>
+  Calling `unsubscribe` on a name that does not exist (or was already removed) is not an error — the server returns a normal response indicating the name that was unsubscribed.
+</Note>
+
+## When to use unsubscribe
+
+- You no longer need notifications for a particular path or filter but want to keep the connection open for other subscriptions.
+- You are rotating subscription names (e.g. changing the expression) and want to ensure the old subscription is cleanly removed before creating a new one.
+
+When your process exits or closes the socket, Watchman removes all subscriptions automatically, so explicit cleanup is only necessary within a long-running connection.

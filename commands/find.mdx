@@ -1,0 +1,110 @@
+---
+title: "find — list files matching patterns in a watched root"
+description: "List all files under a Watchman-watched directory that match optional glob patterns, querying the in-memory file index for fast results."
+---
+
+The `find` command returns all files under a watched root that match the given patterns. If no patterns are specified, every known file is returned. Unlike a real-time filesystem crawl, `find` queries Watchman's in-memory index, making it fast regardless of how many files are in the tree.
+
+## Syntax
+
+```bash
+watchman find <path> [patterns]
+```
+
+- `<path>` — absolute path to the watched root
+- `[patterns]` — optional shell-style glob patterns matched against each file's basename
+
+## How it works
+
+`find` uses the **all generator** — it starts with the complete set of files known to Watchman for the given root. When patterns are provided, results are filtered to files whose names match. The all generator is also the implicit default for the [`query` command](/commands/query) when no other generator is specified.
+
+Because `find` always scans all known files, it is best suited for one-off lookups. For repeated polling or watching specific paths, use [`since`](/commands/since) or [`subscribe`](/commands/subscribe) instead.
+
+## Pattern syntax
+
+Patterns use simple shell glob syntax:
+
+| Pattern | Matches |
+|---------|---------|
+| `*.js` | Any file ending in `.js` |
+| `foo*` | Any file whose name starts with `foo` |
+| `test_?.py` | Files like `test_a.py`, `test_b.py` |
+| `*.[ch]` | Files ending in `.c` or `.h` |
+
+Patterns match against the file's **basename** (the filename within its directory, not the full path).
+
+## Response
+
+The response follows the same structure as other query commands:
+
+```json
+{
+  "version": "4.9",
+  "clock": "c:80616:59",
+  "is_fresh_instance": true,
+  "files": [
+    {
+      "name": "src/main.c",
+      "exists": true,
+      "new": false,
+      "size": 2048,
+      "mode": 33188
+    }
+  ]
+}
+```
+
+<ResponseField name="version" type="string" required>
+  The Watchman server version string.
+</ResponseField>
+
+<ResponseField name="clock" type="string" required>
+  The clock value at the time the query ran. You can pass this to a subsequent [`since`](/commands/since) or [`query`](/commands/query) call.
+</ResponseField>
+
+<ResponseField name="is_fresh_instance" type="boolean" required>
+  Always `true` for `find` results, since the all generator does not use a clockspec.
+</ResponseField>
+
+<ResponseField name="files" type="object[]" required>
+  Array of file result objects. Each entry contains `name`, `exists`, `new`, `size`, and `mode` by default.
+</ResponseField>
+
+## Examples
+
+### List all files in a watched root
+
+```bash
+watchman find /path/to/project
+```
+
+### Find all JavaScript files
+
+```bash
+watchman find /path/to/project '*.js'
+```
+
+### Find all C source and header files
+
+```bash
+watchman find /path/to/project '*.c' '*.h'
+```
+
+### Equivalent query command
+
+The `find` command is shorthand for a `query` using the all generator. The following two commands produce the same results:
+
+```bash
+watchman find /path/to/project '*.js'
+```
+
+```bash
+watchman -j <<< '["query", "/path/to/project", {
+  "expression": ["match", "*.js", "basename"],
+  "fields": ["name", "exists", "new", "size", "mode"]
+}]'
+```
+
+<Tip>
+  To filter by directory depth, file type, or content properties, use the [`query` command](/commands/query) with an explicit generator and expression.
+</Tip>
